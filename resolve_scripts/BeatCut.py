@@ -368,19 +368,19 @@ win = disp.AddWindow({
                   "Weight": 0}),
 
         ui.HGroup({"Weight": 0, "Spacing": 8}, [
-            ui.Button({"ID": "Refresh", "Text": "Aggiorna selezione", "Weight": 2}),
-            ui.Label({"Text": "Sensibilità scene", "Weight": 0}),
-            ui.ComboBox({"ID": "Sens", "Weight": 1}),
-            ui.Button({"ID": "Analyze", "Text": "▶  Analizza (scene + beat)", "Weight": 3}),
+            ui.Button({"ID": "Refresh", "Text": "Aggiorna selezione", "Weight": 4}),
+            ui.Label({"Text": "Sensib. scene", "Weight": 2}),
+            ui.ComboBox({"ID": "Sens", "Weight": 3}),
+            ui.Button({"ID": "Analyze", "Text": "▶  Analizza", "Weight": 4}),
         ]),
 
         ui.HGroup({"Weight": 0, "Spacing": 8}, [
-            ui.ComboBox({"ID": "Style", "Weight": 4}),
-            ui.ComboBox({"ID": "Fmt", "Weight": 3}),
-            ui.Label({"Text": "Durata s", "Weight": 0}),
+            ui.ComboBox({"ID": "Style", "Weight": 5}),
+            ui.ComboBox({"ID": "Fmt", "Weight": 4}),
+            ui.Label({"Text": "Durata s", "Weight": 1}),
             ui.LineEdit({"ID": "Dur", "PlaceholderText": "30", "Weight": 1}),
-            ui.CheckBox({"ID": "Shuffle", "Text": "casuale", "Weight": 0}),
-            ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 0}),
+            ui.CheckBox({"ID": "Shuffle", "Text": "casuale", "Weight": 2}),
+            ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 8}, [
             ui.Button({"ID": "Make", "Text": "▶  Monta a tempo", "Weight": 4}),
