@@ -1,0 +1,92 @@
+BeatCut — plugin/strumento per DaVinci Resolve
+Copyright (c) 2026 Matteo Congedo. Tutti i diritti riservati.
+All rights reserved.
+
+================================================================================
+ITALIANO — Licenza proprietaria (tutti i diritti riservati)
+================================================================================
+
+Il presente software — codice sorgente, script, interfaccia, testi e ogni altro
+contenuto in questo repository (di seguito "il Software") — è di proprietà
+esclusiva di Matteo Congedo ("il Titolare") ed è protetto dalle leggi sul diritto
+d'autore.
+
+NON è concessa alcuna licenza d'uso, salvo quanto espressamente indicato qui sotto.
+
+1. USO CONSENTITO
+   È consentito unicamente:
+   (a) al Titolare, utilizzare il Software per il proprio lavoro di montaggio;
+   (b) visualizzare il codice sorgente a soli fini personali di studio.
+
+2. USI VIETATI
+   Senza il permesso scritto e preventivo del Titolare è espressamente VIETATO:
+   (a) copiare, riprodurre o scaricare il Software (in tutto o in parte) per scopi
+       diversi dal suo normale utilizzo da parte del Titolare;
+   (b) modificare, adattare, tradurre o creare opere derivate destinate a terzi;
+   (c) ridistribuire, ripubblicare, ospitare, rivendere, concedere in sublicenza o
+       mettere in altro modo a disposizione di terzi il Software o sue parti,
+       gratuitamente o a pagamento;
+   (d) utilizzare il Software o sue parti per scopi commerciali da parte di terzi;
+   (e) rimuovere o alterare le note di copyright o la presente licenza;
+   (f) decompilare o effettuare reverse engineering allo scopo di ridistribuire o
+       ricreare il Software.
+
+3. NESSUNA CESSIONE DI DIRITTI
+   L'accesso o la visualizzazione del Software non trasferiscono alcun diritto di
+   proprietà intellettuale. Tutti i diritti non espressamente concessi restano
+   riservati al Titolare.
+
+4. PERMESSI
+   Per qualsiasi uso non contemplato dal punto 1 è necessario un accordo scritto con
+   il Titolare. Le richieste vanno indirizzate al Titolare del copyright.
+
+5. NESSUNA GARANZIA
+   IL SOFTWARE È FORNITO "COSÌ COM'È", SENZA GARANZIE DI ALCUN TIPO, ESPRESSE O
+   IMPLICITE. IN NESSUN CASO IL TITOLARE SARÀ RESPONSABILE PER DANNI DERIVANTI
+   DALL'USO O DALL'IMPOSSIBILITÀ D'USO DEL SOFTWARE.
+
+6. SOFTWARE DI TERZI
+   DaVinci Resolve e il modulo di scripting "DaVinciResolveScript" sono di
+   Blackmagic Design; l'API e i modelli Claude sono di Anthropic. Il Software si
+   limita a interagire con tali prodotti tramite le loro interfacce pubbliche. La
+   presente licenza copre esclusivamente il codice del plugin realizzato dal
+   Titolare e non rivendica alcun diritto sui software o servizi di terzi.
+
+================================================================================
+ENGLISH — Proprietary license (all rights reserved)
+================================================================================
+
+This software — source code, scripts, interface, text and any other content in this
+repository ("the Software") — is the exclusive property of Matteo Congedo ("the
+Owner") and is protected by copyright law.
+
+No license is granted except as expressly stated below.
+
+1. PERMITTED USE. Only: (a) the Owner may use the Software for their own video
+   editing work; (b) you may view the source code for personal study purposes only.
+
+2. PROHIBITED USES. Without the Owner's prior written permission you may NOT:
+   (a) copy, reproduce or download the Software (in whole or in part) for any purpose
+   other than the Owner's normal use of it; (b) modify, adapt, translate or create
+   derivative works intended for third parties; (c) redistribute, republish, host,
+   resell, sublicense or otherwise make the Software or parts of it available to third
+   parties, whether free or for a fee; (d) use the Software or parts of it for
+   commercial purposes by third parties; (e) remove or alter copyright notices or this
+   license; (f) decompile or reverse engineer it in order to redistribute or recreate
+   the Software.
+
+3. NO TRANSFER OF RIGHTS. Accessing or viewing the Software transfers no intellectual
+   property rights. All rights not expressly granted are reserved.
+
+4. PERMISSIONS. Any use not covered by section 1 requires a written agreement with the
+   Owner. Requests should be addressed to the copyright Owner.
+
+5. NO WARRANTY. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN NO
+   EVENT SHALL THE OWNER BE LIABLE FOR ANY DAMAGES ARISING FROM THE USE OR INABILITY TO
+   USE THE SOFTWARE.
+
+6. THIRD-PARTY SOFTWARE. DaVinci Resolve and the "DaVinciResolveScript" scripting
+   module belong to Blackmagic Design; the Claude API and models belong to Anthropic.
+   The Software merely interacts with those products through their public interfaces.
+   This license covers only the plugin code created by the Owner and claims no rights
+   over any third-party software or services.
