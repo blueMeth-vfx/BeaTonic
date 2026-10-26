@@ -85,67 +85,51 @@ def _decode_mono(path, sr=11025):
     return [x / 32768.0 for x in data], sr
 
 
-def _onset_env(sig, sr, hop=256):
-    frames = []
+def _onset_rms(sig, sr, hop=128):
+    E, RMS = [], []
     for i in range(0, len(sig) - hop, hop):
         e = 0.0
         for j in range(i, i + hop):
             e += sig[j] * sig[j]
-        frames.append(e)
-    env = [max(0.0, frames[i] - frames[i - 1]) for i in range(1, len(frames))]
-    return env, sr / hop
+        E.append(e)
+        RMS.append((e / hop) ** 0.5)
+    env = [max(0.0, E[k] - E[k - 1]) for k in range(1, len(E))]  # flusso d'energia
+    return env, RMS[1:], sr / hop
 
 
 def beat_grid(path):
-    """Ritorna (bpm, [tempi dei beat in secondi]) con prior sul tempo + aggancio."""
+    """Segue i TRANSIENTI della forma d'onda (non una griglia a tempo fisso): cosi'
+    si adatta ai cambi di BPM e, grazie al GATE sull'energia, nei punti in cui la
+    canzone sfuma/tace NON mette onset. Ritorna (bpm_medio, [tempi onset in s])."""
     sig, sr = _decode_mono(path)
-    env, fps = _onset_env(sig, sr)
+    env, rms, fps = _onset_rms(sig, sr)
     if len(env) < 10:
         return 0.0, []
-    lo = max(1, int(fps * 60 / 180)); hi = int(fps * 60 / 60)
-    mean = sum(env) / len(env)
-    e = [x - mean for x in env]
-    corr = {}
-    for lag in range(lo, hi + 1):
-        s = 0.0
-        for i in range(lag, len(e)):
-            s += e[i] * e[i - lag]
-        corr[lag] = s
-    mx = max(corr.values()) or 1.0
-    bestL, best = lo, -1
-    for lag, c in corr.items():
-        bpm = 60.0 * fps / lag
-        w = math.exp(-0.5 * (math.log(bpm / 120.0) / 0.55) ** 2)
-        sc = (c / mx) * w
-        if sc > best:
-            best, bestL = sc, lag
-    # interpolazione parabolica per periodo sub-frame
-    c0 = corr.get(bestL - 1, 0.0); c1 = corr[bestL]; c2 = corr.get(bestL + 1, 0.0)
-    denom = (c0 - 2 * c1 + c2)
-    period = bestL + (0.5 * (c0 - c2) / denom if denom else 0.0)
-    bpm = 60.0 * fps / period
-    # fase: offset che massimizza l'onset sui beat
-    bestoff, bo = 0.0, -1
-    o = 0.0
-    while o < period:
-        s = 0.0; k = 0
-        while int(o + k * period) < len(env):
-            s += env[int(o + k * period)]; k += 1
-        if s > bo:
-            bo, bestoff = s, o
-        o += period / 24.0
-    # griglia + aggancio di ogni beat al massimo onset vicino (+/-12% del periodo)
+    envmax = max(env) or 1.0
+    med = sorted(r for r in rms if r > 0)
+    rms_med = med[len(med) // 2] if med else 0.0
+    gate = 0.12 * rms_med            # sotto = silenzio/sfumato -> niente onset
+    win = max(1, int(fps * 0.8)); w = 3
+    onsets = []
+    for i in range(w, len(env) - w):
+        if rms[i] < gate:
+            continue
+        if env[i] < max(env[i - w:i + w + 1]):
+            continue                 # non e' un massimo locale
+        a = max(0, i - win); b = min(len(env), i + win)
+        loc = env[a:b]; m = sum(loc) / len(loc)
+        sd = (sum((x - m) ** 2 for x in loc) / len(loc)) ** 0.5
+        if env[i] > m + 1.2 * sd and env[i] > 0.02 * envmax:
+            onsets.append(i / fps)
     times = []
-    k = 0
-    win = max(1, int(period * 0.12))
-    while int(bestoff + k * period) < len(env):
-        c = int(bestoff + k * period)
-        a = max(0, c - win); b = min(len(env), c + win + 1)
-        bi = max(range(a, b), key=lambda i: env[i]) if b > a else c
-        times.append(bi / fps)
-        k += 1
-    # dedup/ordina
-    times = sorted(set(round(t, 3) for t in times))
+    for t in onsets:                 # togli doppioni troppo vicini
+        if not times or t - times[-1] > 0.15:
+            times.append(round(t, 3))
+    if len(times) > 2:
+        avg = sum(times[i + 1] - times[i] for i in range(len(times) - 1)) / (len(times) - 1)
+        bpm = 60.0 / avg if avg else 0.0
+    else:
+        bpm = 0.0
     return bpm, times
 
 
@@ -247,7 +231,7 @@ def _intervals(beats, pattern, dur):
     return out
 
 
-def montage(shots, song, beats, style, dur, fmt, shuffle, set_log):
+def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, set_log):
     proj = resolve.GetProjectManager().GetCurrentProject()
     mp = proj.GetMediaPool()
     if not shots:
@@ -282,9 +266,11 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, set_log):
     # "tape" continuo: posizione globale su tape[ti] a partire da shot['in']
     ti = [0]
     pos = [tape[0]["in"]] if tape else [0.0]
+    exhausted = [False]
 
     def pull(length):
-        """Ritorna lista di (clip, fps, src_in, src_out) lunga ~length s, scorrendo il tape."""
+        """Lista di (clip, fps, src_in, src_out) lunga ~length s, scorrendo il tape.
+        Se 'reuse' e' spento, si ferma quando il materiale finisce (niente ripetizioni)."""
         pieces = []
         need = length
         guard = 0
@@ -294,6 +280,9 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, set_log):
             avail = sh["out"] - pos[0]
             if avail <= 0.02:
                 ti[0] += 1
+                if not reuse and ti[0] >= len(tape):
+                    exhausted[0] = True
+                    break
                 pos[0] = tape[ti[0] % len(tape)]["in"]
                 continue
             take = min(need, avail)
@@ -303,9 +292,12 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, set_log):
         return pieces
 
     ok = 0
+    total_sec = 0.0
     for (bs, be) in ivs:
-        length = be - bs
-        for clip, cfps, si, so in pull(length):
+        pieces = pull(be - bs)
+        if not pieces:
+            break
+        for clip, cfps, si, so in pieces:
             sf = int(round(si * cfps)); ef = int(round(so * cfps))
             if ef <= sf:
                 ef = sf + 1
@@ -314,9 +306,11 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, set_log):
             try:
                 if mp.AppendToTimeline([info]):   # SEQUENZIALE = gapless, sui beat
                     ok += 1
+                    total_sec += (so - si)
             except Exception:
                 pass
-    total_sec = sum(be - bs for bs, be in ivs)
+        if exhausted[0]:
+            break
     # canzone su A1, dall'inizio, lunga quanto il montaggio
     try:
         send = int(round(total_sec * tl_fps))
@@ -386,6 +380,7 @@ win = disp.AddWindow({
             ui.Label({"Text": "Durata s", "Weight": 0}),
             ui.LineEdit({"ID": "Dur", "PlaceholderText": "30", "Weight": 1}),
             ui.CheckBox({"ID": "Shuffle", "Text": "casuale", "Weight": 0}),
+            ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 0}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 8}, [
             ui.Button({"ID": "Make", "Text": "▶  Monta a tempo", "Weight": 4}),
@@ -461,7 +456,8 @@ def on_make(ev):
         dur = 30.0
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, BEATS, itm["Style"].CurrentText, dur,
-                  itm["Fmt"].CurrentText, bool(itm["Shuffle"].Checked), set_log)
+                  itm["Fmt"].CurrentText, bool(itm["Shuffle"].Checked),
+                  bool(itm["Reuse"].Checked), set_log)
     set_log(msg)
     set_status(msg[:80])
 
