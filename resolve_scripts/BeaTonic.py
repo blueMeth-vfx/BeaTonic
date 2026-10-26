@@ -18,6 +18,10 @@ import struct
 import subprocess
 import wave
 
+_LOGO = os.path.join(os.environ.get("APPDATA", ""), "Blackmagic Design",
+                     "DaVinci Resolve", "Support", "Fusion", "Scripts", "Utility",
+                     "plutonic_logo.png")
+
 # --------------------------------------------------------------------------
 # Connessione a Resolve / Fusion
 # --------------------------------------------------------------------------
@@ -361,31 +365,38 @@ def _tl_fps(tl):
 # --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
-ACCENT = "#c86bf0"  # viola (gli altri plugin: ambra/ciano/verde)
+ACCENT = "#7c3aed"  # viola Plutonic (violet-600)
 STYLE = """
-* { font-family:'Segoe UI',sans-serif; font-size:13px; color:#e6e8ea; outline:none; }
-QWidget { background-color:#1b1e23; }
-QLabel#Header { font-size:20px; font-weight:800; color:%(a)s; }
-QLabel#Src { color:#b8c0cc; padding:4px 2px; }
-QLineEdit, QComboBox { background:#262a31; border:1px solid #3a3f47; border-radius:5px; padding:5px 7px; }
-QLineEdit:focus, QComboBox:focus { border:1px solid %(a)s; }
-QPushButton { background:#333842; border:1px solid #444b55; border-radius:6px; padding:6px 12px; }
-QPushButton:hover { background:#3d434e; }
-QPushButton#Analyze, QPushButton#Make { background:%(a)s; color:#1b1023; font-weight:800; border:0; padding:9px 12px; }
-QPushButton#Analyze:hover, QPushButton#Make:hover { background:#d98df5; }
-QCheckBox::indicator { width:15px; height:15px; border-radius:4px; border:1px solid #4a515b; background:#262a31; }
+* { font-family:'Segoe UI','Inter',sans-serif; font-size:13px; color:#e5e7eb; outline:none; }
+QWidget { background-color:#0f1115; }
+QLabel#Header { font-size:20px; font-weight:800; color:#a78bfa; }
+QPushButton#Logo { background:transparent; border:0; }
+QLabel#Src { color:#9ca3af; padding:4px 2px; }
+QLineEdit, QComboBox { background:#111827; border:1px solid #1f2937; border-radius:8px; padding:6px 9px; selection-background-color:%(a)s; }
+QLineEdit:focus, QComboBox:focus { border:1px solid #8b5cf6; }
+QComboBox::drop-down { border:0; width:18px; }
+QPushButton { background:#1f2937; border:1px solid #374151; border-radius:8px; padding:7px 13px; }
+QPushButton:hover { background:#374151; }
+QPushButton:pressed { background:#111827; }
+QPushButton#Analyze, QPushButton#Make { background:%(a)s; color:#ffffff; font-weight:700; border:0; padding:9px 13px; }
+QPushButton#Analyze:hover, QPushButton#Make:hover { background:#8b5cf6; }
+QPushButton#Close { color:#9ca3af; }
+QCheckBox { spacing:6px; }
+QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:1px solid #374151; background:#111827; }
 QCheckBox::indicator:checked { background:%(a)s; border:1px solid %(a)s; }
-QTextEdit { background:#15181c; border:1px solid #333842; border-radius:6px; color:#cbd2da; padding:6px 8px; }
-QLabel#Status { color:#9aa2ad; background:#15181c; border:1px solid #333842; border-radius:5px; padding:6px 9px; }
+QTextEdit { background:#0b0d11; border:1px solid #1f2937; border-radius:10px; color:#cbd2da; padding:7px 9px; }
+QLabel#Status { color:#9ca3af; background:#0b0d11; border:1px solid #1f2937; border-radius:8px; padding:7px 10px; }
 """ % {"a": ACCENT}
 
 win = disp.AddWindow({
-    "ID": "BeatCutWin", "WindowTitle": "BeatCut", "Geometry": [120, 90, 920, 560],
+    "ID": "BeaTonicWin", "WindowTitle": "BeaTonic", "Geometry": [120, 90, 940, 560],
     "StyleSheet": STYLE,
 }, [
     ui.VGroup({"Spacing": 7, "Margin": 14}, [
         ui.HGroup({"Weight": 0, "Spacing": 10}, [
-            ui.Label({"ID": "Header", "Text": "♪  BeatCut", "Weight": 0}),
+            ui.Button({"ID": "Logo", "Flat": True, "Weight": 0,
+                       "MinimumSize": [30, 30], "MaximumSize": [30, 30]}),
+            ui.Label({"ID": "Header", "Text": "BeaTonic", "Weight": 0}),
             ui.Label({"Text": "montaggio a tempo di musica", "Weight": 1,
                       "Alignment": {"AlignBottom": True}}),
         ]),
@@ -419,6 +430,12 @@ win = disp.AddWindow({
 ])
 
 itm = win.GetItems()
+try:
+    if os.path.exists(_LOGO):
+        itm["Logo"].Icon = ui.Icon({"File": _LOGO})
+        itm["Logo"].IconSize = [26, 26]
+except Exception:
+    pass
 for c in ["0.3 (media)", "0.2 (sensibile)", "0.4 (poco)", "0.5 (minima)"]:
     itm["Sens"].AddItem(c)
 for s in STYLES:
@@ -495,7 +512,7 @@ win.On.Refresh.Clicked = on_refresh
 win.On.Analyze.Clicked = on_analyze
 win.On.Make.Clicked = on_make
 win.On.Close.Clicked = on_close
-win.On.BeatCutWin.Close = on_close
+win.On.BeaTonicWin.Close = on_close
 
 on_refresh()
 if not FFMPEG:
