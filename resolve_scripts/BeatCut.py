@@ -130,7 +130,27 @@ def beat_grid(path):
         bpm = 60.0 / avg if avg else 0.0
     else:
         bpm = 0.0
-    return bpm, times
+    # INTENSITA' per onset: energia RMS locale (smussata ~1s) normalizzata 0..1.
+    # Serve allo stile "dinamico" per seguire i sali/scendi del brano.
+    cs = [0.0]
+    for v in rms:
+        cs.append(cs[-1] + v)
+    wsm = max(1, int(fps * 0.5))
+
+    def _loc(fr):
+        a = max(0, fr - wsm); b = min(len(rms), fr + wsm + 1)
+        return (cs[b] - cs[a]) / (b - a) if b > a else 0.0
+
+    oe = [_loc(min(len(rms) - 1, int(t * fps))) for t in times]
+    if oe:
+        srt = sorted(oe)
+        lo = srt[int(0.1 * len(srt))]
+        hi = srt[min(len(srt) - 1, int(0.9 * len(srt)))]
+        rng = (hi - lo) or 1.0
+        intens = [max(0.0, min(1.0, (e - lo) / rng)) for e in oe]
+    else:
+        intens = []
+    return bpm, times, intens
 
 
 # --------------------------------------------------------------------------
@@ -210,7 +230,7 @@ STYLES = {
     "Veloce (ogni beat)": [1],
     "Medio (ogni 2 beat)": [2],
     "Lento (ogni 4 beat)": [4],
-    "Dinamico (alterna)": [1, 1, 2, 1, 4, 2],
+    "Dinamico (segue l'energia)": None,   # densità dei tagli guidata dall'intensità
 }
 FORMATS = {
     "Orizzontale 16:9": (1920, 1080),
@@ -218,11 +238,16 @@ FORMATS = {
 }
 
 
-def _intervals(beats, pattern, dur):
+def _intervals(beats, style, dur, intens):
+    pat = STYLES.get(style)
     out = []
     j, pi = 0, 0
     while j < len(beats) - 1 and beats[j] < dur:
-        mult = pattern[pi % len(pattern)]; pi += 1
+        if pat:                       # stili fissi: veloce/medio/lento
+            mult = pat[pi % len(pat)]; pi += 1
+        else:                         # DINAMICO: densità dall'energia locale
+            v = intens[j] if j < len(intens) else 0.5
+            mult = 1 if v >= 0.6 else (2 if v >= 0.33 else 4)
         k = min(j + mult, len(beats) - 1)
         end = min(beats[k], dur)
         if end - beats[j] > 0.08:
@@ -231,7 +256,7 @@ def _intervals(beats, pattern, dur):
     return out
 
 
-def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, set_log):
+def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, intens, set_log):
     proj = resolve.GetProjectManager().GetCurrentProject()
     mp = proj.GetMediaPool()
     if not shots:
@@ -262,7 +287,7 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, set_log):
     tl_fps = _tl_fps(new)
     ns = new.GetStartFrame()
 
-    ivs = _intervals(beats, STYLES.get(style, [1]), dur)
+    ivs = _intervals(beats, style, dur, intens)
     # "tape" continuo: posizione globale su tape[ti] a partire da shot['in']
     ti = [0]
     pos = [tape[0]["in"]] if tape else [0.0]
@@ -401,7 +426,7 @@ for s in STYLES:
 for f in FORMATS:
     itm["Fmt"].AddItem(f)
 
-VIDEOS, SONG, SHOTS, BEATS, BPM = [], None, [], [], 0.0
+VIDEOS, SONG, SHOTS, BEATS, BPM, INTENS = [], None, [], [], 0.0, []
 
 
 def set_status(m):
@@ -428,7 +453,7 @@ def on_refresh(ev=None):
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPM
+    global SHOTS, BEATS, BPM, INTENS
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -440,7 +465,7 @@ def on_analyze(ev):
     set_status("Analisi in corso (la finestra resta ferma)…")
     SHOTS = build_shots(VIDEOS, sens, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
-    BPM, BEATS = beat_grid(SONG.GetClipProperty("File Path") or "")
+    BPM, BEATS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
     set_log("ANALISI FATTA.\n• %d shot dalle clip (cambi scena).\n• Canzone: %.0f BPM, %d beat.\n\n"
             "Ora scegli stile/durata/formato e premi 'Monta a tempo'."
             % (len(SHOTS), BPM, len(BEATS)))
@@ -457,7 +482,7 @@ def on_make(ev):
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, BEATS, itm["Style"].CurrentText, dur,
                   itm["Fmt"].CurrentText, bool(itm["Shuffle"].Checked),
-                  bool(itm["Reuse"].Checked), set_log)
+                  bool(itm["Reuse"].Checked), INTENS, set_log)
     set_log(msg)
     set_status(msg[:80])
 
