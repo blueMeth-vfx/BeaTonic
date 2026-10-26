@@ -1,5 +1,5 @@
 """
-BeatCut - GUI per DaVinci Resolve (Workspace > Scripts > Utility > BeatCut)
+BeaTonic - GUI per DaVinci Resolve (Workspace > Scripts > Utility > BeaTonic)
 
 Montaggio ritmato a tempo di musica:
   1) Selezioni nel Media Pool le CLIP video (sorgenti) + la CANZONE (clip audio).

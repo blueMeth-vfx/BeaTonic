@@ -1,0 +1,31 @@
+BeaTonic - installazione in DaVinci Resolve
+===========================================
+(Plutonic Studio)
+
+Serve DaVinci Resolve STUDIO (nella versione gratuita lo scripting non c'e').
+Serve anche ffmpeg (vedi punto 2).
+
+1) Copia QUESTI DUE FILE:
+      BeaTonic.py
+      plutonic_logo.png
+   dentro la cartella degli script "Utility" di Resolve:
+
+   Windows:
+     %APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility
+   macOS:
+     ~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility
+
+   (Se la cartella "Utility" non esiste, creala.)
+
+2) Installa ffmpeg:
+   - scaricalo da https://www.gyan.dev/ffmpeg/builds/ (build "release essentials")
+   - BeaTonic lo trova da solo se e' in  D:\ffmpeg\bin  oppure  C:\ffmpeg\bin
+   - altrimenti crea la variabile d'ambiente FFMPEG col percorso di ffmpeg.exe
+
+3) Avvia (o riavvia) DaVinci Resolve.
+
+4) Apri il plugin da:
+     Workspace > Scripts > Utility > BeaTonic
+
+Il logo (plutonic_logo.png) serve solo per l'icona nel pannello:
+se manca, il plugin funziona lo stesso.
