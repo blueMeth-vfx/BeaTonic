@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="resolve_scripts/plutonic_logo.png" width="110" alt="Plutonic">
+  <img src="resolve_scripts/plutonic_logo.png" width="170" alt="Plutonic">
 </p>
 
 <h1 align="center">BeaTonic</h1>
@@ -28,6 +28,14 @@ infittiscono; dove si calma o sfuma, rallentano. Scegli lo **stile**
 (veloce / medio / lento / **dinamico**, che segue da solo i sali-e-scendi del
 pezzo), la **durata** in secondi e il **formato** (orizzontale 16:9 o verticale 9:16
 per i social).
+
+---
+
+## Due temi
+
+Col pulsante in alto a destra passi tra **Scuro — Plutonic Studio** (viola) e
+**Chiaro — Plutonic Labs** (paper + gradiente tramonto). La scelta è ricordata e
+condivisa con PlutoniCut.
 
 ---
 

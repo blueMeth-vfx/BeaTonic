@@ -365,28 +365,78 @@ def _tl_fps(tl):
 # --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
-ACCENT = "#7c3aed"  # viola Plutonic (violet-600)
-STYLE = """
-* { font-family:'Segoe UI','Inter',sans-serif; font-size:13px; color:#e5e7eb; outline:none; }
-QWidget { background-color:#0f1115; }
-QLabel#Header { font-size:20px; font-weight:800; color:#a78bfa; }
+# Temi Plutonic: Scuro (Plutonic Studio) / Chiaro (Plutonic Labs).
+# La scelta e' ricordata (condivisa con PlutoniCut) in %APPDATA%\Plutonic\theme.txt
+_THEME_FILE = os.path.join(os.environ.get("APPDATA", ""), "Plutonic", "theme.txt")
+
+
+def load_theme():
+    try:
+        with open(_THEME_FILE, "r") as f:
+            t = f.read().strip()
+        return t if t in ("studio", "labs") else "studio"
+    except Exception:
+        return "studio"
+
+
+def save_theme(name):
+    try:
+        os.makedirs(os.path.dirname(_THEME_FILE), exist_ok=True)
+        with open(_THEME_FILE, "w") as f:
+            f.write(name)
+    except Exception:
+        pass
+
+
+_PAL = {
+    "studio": {
+        "font": "'Segoe UI','Inter',sans-serif", "hfont": "'Segoe UI','Inter',sans-serif",
+        "bg": "#0f1115", "panel": "#111827", "tree": "#0b0d11", "fg": "#e5e7eb",
+        "logfg": "#cbd2da", "muted": "#9ca3af", "border": "#1f2937", "border2": "#374151",
+        "bw": "1px", "radius": "8px", "accent": "#7c3aed", "focus": "#8b5cf6",
+        "header": "#a78bfa", "selfg": "#ffffff",
+        "primaryBg": "#7c3aed", "primaryHover": "#8b5cf6",
+        "primaryFg": "#ffffff", "primaryBorder": "border:0;",
+    },
+    "labs": {
+        "font": "'Public Sans','Segoe UI',sans-serif", "hfont": "'Rubik Mono One','Impact',sans-serif",
+        "bg": "#F3F0F7", "panel": "#FBF4FF", "tree": "#FBF4FF", "fg": "#0E0418",
+        "logfg": "#24103F", "muted": "#4B4458", "border": "#0E0418", "border2": "#0E0418",
+        "bw": "2px", "radius": "6px", "accent": "#EE3A5B", "focus": "#EE3A5B",
+        "header": "#B0126E", "selfg": "#ffffff",
+        "primaryBg": "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #F7A541, stop:1 #EE3A5B)",
+        "primaryHover": "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #F4F07C, stop:1 #F7A541)",
+        "primaryFg": "#0E0418", "primaryBorder": "border:2px solid #0E0418;",
+    },
+}
+
+_TMPL = """
+* { font-family:%(font)s; font-size:13px; color:%(fg)s; outline:none; }
+QWidget { background-color:%(bg)s; }
+QLabel#Header { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
 QPushButton#Logo { background:transparent; border:0; }
-QLabel#Src { color:#9ca3af; padding:4px 2px; }
-QLineEdit, QComboBox { background:#111827; border:1px solid #1f2937; border-radius:8px; padding:6px 9px; selection-background-color:%(a)s; }
-QLineEdit:focus, QComboBox:focus { border:1px solid #8b5cf6; }
+QPushButton#ThemeBtn { background:transparent; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:4px 9px; color:%(muted)s; font-weight:700; }
+QPushButton#ThemeBtn:hover { border:%(bw)s solid %(accent)s; color:%(fg)s; }
+QLabel#Src { color:%(muted)s; padding:4px 2px; }
+QLineEdit, QComboBox { background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:6px 9px; selection-background-color:%(accent)s; selection-color:%(selfg)s; }
+QLineEdit:focus, QComboBox:focus { border:%(bw)s solid %(focus)s; }
 QComboBox::drop-down { border:0; width:18px; }
-QPushButton { background:#1f2937; border:1px solid #374151; border-radius:8px; padding:7px 13px; }
-QPushButton:hover { background:#374151; }
-QPushButton:pressed { background:#111827; }
-QPushButton#Analyze, QPushButton#Make { background:%(a)s; color:#ffffff; font-weight:700; border:0; padding:9px 13px; }
-QPushButton#Analyze:hover, QPushButton#Make:hover { background:#8b5cf6; }
-QPushButton#Close { color:#9ca3af; }
+QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; }
+QPushButton:hover { background:%(border)s; }
+QPushButton:pressed { background:%(tree)s; }
+QPushButton#Analyze, QPushButton#Make { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
+QPushButton#Analyze:hover, QPushButton#Make:hover { background:%(primaryHover)s; }
+QPushButton#Close { color:%(muted)s; }
 QCheckBox { spacing:6px; }
-QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:1px solid #374151; background:#111827; }
-QCheckBox::indicator:checked { background:%(a)s; border:1px solid %(a)s; }
-QTextEdit { background:#0b0d11; border:1px solid #1f2937; border-radius:10px; color:#cbd2da; padding:7px 9px; }
-QLabel#Status { color:#9ca3af; background:#0b0d11; border:1px solid #1f2937; border-radius:8px; padding:7px 10px; }
-""" % {"a": ACCENT}
+QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:%(bw)s solid %(border2)s; background:%(panel)s; }
+QCheckBox::indicator:checked { background:%(accent)s; border:%(bw)s solid %(accent)s; }
+QTextEdit { background:%(tree)s; border:%(bw)s solid %(border)s; border-radius:10px; color:%(logfg)s; padding:7px 9px; }
+QLabel#Status { color:%(muted)s; background:%(tree)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:7px 10px; }
+"""
+
+STYLE_FOR = {name: _TMPL % pal for name, pal in _PAL.items()}
+THEME = load_theme()
+STYLE = STYLE_FOR[THEME]
 
 win = disp.AddWindow({
     "ID": "BeaTonicWin", "WindowTitle": "BeaTonic", "Geometry": [120, 90, 940, 560],
@@ -395,10 +445,11 @@ win = disp.AddWindow({
     ui.VGroup({"Spacing": 7, "Margin": 14}, [
         ui.HGroup({"Weight": 0, "Spacing": 10}, [
             ui.Button({"ID": "Logo", "Flat": True, "Weight": 0,
-                       "MinimumSize": [30, 30], "MaximumSize": [30, 30]}),
+                       "MinimumSize": [62, 48], "MaximumSize": [62, 48]}),
             ui.Label({"ID": "Header", "Text": "BeaTonic", "Weight": 0}),
             ui.Label({"Text": "montaggio a tempo di musica", "Weight": 1,
                       "Alignment": {"AlignBottom": True}}),
+            ui.Button({"ID": "ThemeBtn", "Text": "☀  Tema Labs", "Weight": 0}),
         ]),
         ui.Label({"ID": "Src", "Text": "Seleziona clip + canzone nel Media Pool, poi Aggiorna.",
                   "Weight": 0}),
@@ -433,7 +484,7 @@ itm = win.GetItems()
 try:
     if os.path.exists(_LOGO):
         itm["Logo"].Icon = ui.Icon({"File": _LOGO})
-        itm["Logo"].IconSize = [26, 26]
+        itm["Logo"].IconSize = [58, 44]
 except Exception:
     pass
 for c in ["0.3 (media)", "0.2 (sensibile)", "0.4 (poco)", "0.5 (minima)"]:
@@ -513,6 +564,35 @@ win.On.Analyze.Clicked = on_analyze
 win.On.Make.Clicked = on_make
 win.On.Close.Clicked = on_close
 win.On.BeaTonicWin.Close = on_close
+
+
+def apply_theme(name):
+    global THEME
+    THEME = name
+    done = False
+    try:
+        win.SetStyleSheet(STYLE_FOR[name]); done = True
+    except Exception:
+        pass
+    if not done:
+        try:
+            itm["BeaTonicWin"].SetStyleSheet(STYLE_FOR[name])
+        except Exception:
+            pass
+    try:
+        itm["ThemeBtn"].Text = ("☀  Tema Labs" if name == "studio"
+                                else "☾  Tema Studio")
+    except Exception:
+        pass
+    save_theme(name)
+
+
+def on_theme(ev=None):
+    apply_theme("labs" if THEME == "studio" else "studio")
+
+
+win.On.ThemeBtn.Clicked = on_theme
+apply_theme(THEME)
 
 on_refresh()
 if not FFMPEG:
