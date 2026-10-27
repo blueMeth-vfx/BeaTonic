@@ -414,20 +414,20 @@ _TMPL = """
 * { font-family:%(font)s; font-size:13px; color:%(fg)s; outline:none; }
 QWidget { background-color:%(bg)s; }
 QLabel#Header { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
-QPushButton#Logo { background:transparent; border:0; }
+QPushButton#Logo { background:transparent; border:0; margin:0px; }
 QPushButton#ThemeBtn { background:transparent; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:4px 9px; color:%(muted)s; font-weight:700; }
 QPushButton#ThemeBtn:hover { border:%(bw)s solid %(accent)s; color:%(fg)s; }
 QLabel#Src { color:%(muted)s; padding:4px 2px; }
-QLineEdit, QComboBox { background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:6px 9px; selection-background-color:%(accent)s; selection-color:%(selfg)s; }
+QLineEdit, QComboBox { background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:6px 9px; margin:0px 3px; selection-background-color:%(accent)s; selection-color:%(selfg)s; }
 QLineEdit:focus, QComboBox:focus { border:%(bw)s solid %(focus)s; }
 QComboBox::drop-down { border:0; width:18px; }
-QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; }
+QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; margin:0px 3px; }
 QPushButton:hover { background:%(border)s; }
 QPushButton:pressed { background:%(tree)s; }
 QPushButton#Analyze, QPushButton#Make { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
 QPushButton#Analyze:hover, QPushButton#Make:hover { background:%(primaryHover)s; }
 QPushButton#Close { color:%(muted)s; }
-QCheckBox { spacing:6px; }
+QCheckBox { spacing:6px; margin:0px 3px; }
 QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:%(bw)s solid %(border2)s; background:%(panel)s; }
 QCheckBox::indicator:checked { background:%(accent)s; border:%(bw)s solid %(accent)s; }
 QTextEdit { background:%(tree)s; border:%(bw)s solid %(border)s; border-radius:10px; color:%(logfg)s; padding:7px 9px; }
@@ -443,7 +443,7 @@ win = disp.AddWindow({
     "StyleSheet": STYLE,
 }, [
     ui.VGroup({"Spacing": 7, "Margin": 14}, [
-        ui.HGroup({"Weight": 0, "Spacing": 10}, [
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
             ui.Button({"ID": "Logo", "Flat": True, "Weight": 0,
                        "MinimumSize": [62, 48], "MaximumSize": [62, 48]}),
             ui.Label({"ID": "Header", "Text": "BeaTonic", "Weight": 0}),
@@ -454,14 +454,14 @@ win = disp.AddWindow({
         ui.Label({"ID": "Src", "Text": "Seleziona clip + canzone nel Media Pool, poi Aggiorna.",
                   "Weight": 0}),
 
-        ui.HGroup({"Weight": 0, "Spacing": 8}, [
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
             ui.Button({"ID": "Refresh", "Text": "Aggiorna selezione", "Weight": 4}),
             ui.Label({"Text": "Sensib. scene", "Weight": 2}),
             ui.ComboBox({"ID": "Sens", "Weight": 3}),
             ui.Button({"ID": "Analyze", "Text": "▶  Analizza", "Weight": 4}),
         ]),
 
-        ui.HGroup({"Weight": 0, "Spacing": 8}, [
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
             ui.ComboBox({"ID": "Style", "Weight": 5}),
             ui.ComboBox({"ID": "Fmt", "Weight": 4}),
             ui.Label({"Text": "Durata s", "Weight": 1}),
@@ -469,7 +469,7 @@ win = disp.AddWindow({
             ui.CheckBox({"ID": "Shuffle", "Text": "casuale", "Weight": 2}),
             ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
-        ui.HGroup({"Weight": 0, "Spacing": 8}, [
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
             ui.Button({"ID": "Make", "Text": "▶  Monta a tempo", "Weight": 4}),
             ui.Button({"ID": "Close", "Text": "Chiudi", "Weight": 1}),
         ]),
