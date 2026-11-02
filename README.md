@@ -88,20 +88,32 @@ condivisa con PlutoniCut.
 
    La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
    della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
-5. **◆ Marker sui beat** *(facoltativo, consigliato)* → nasce una timeline con la sola
-   canzone e un **marker a ogni punto di taglio**: rosso = inizio battuta, ciano = beat.
-   Ascoltala e sistema i tagli come vuoi:
-   - **spostare** un taglio: trascina il marker sul righello;
-   - **toglierlo**: clic sul marker e `Canc`;
-   - **aggiungerne uno**: porta la testina dove vuoi e premi `M`.
+5. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker**, una
+   finestra del plugin (niente lavoro sulla timeline di Resolve):
+   - in alto **tutta la canzone** con la forma d'onda, sotto il **dettaglio** attorno al
+     cursore (zoom 4 / 8 / 16 / 32 s) con la griglia dei beat;
+   - **un solo tipo di marker: ogni marker è un cambio clip**; si parte dai punti di
+     taglio dello stile scelto;
+   - **▶ Ascolta** e premi **+ Marker** a tempo, anche con la barra spaziatrice: il
+     marker si aggancia al beat più vicino (spunta *aggancia al beat*);
+   - **◀ Marker / Marker ▶** saltano tra i marker; **– Marker** e **◀ 1 fot. / 1 fot. ▶**
+     agiscono sul marker evidenziato (il più vicino al cursore);
+   - clic sulla forma d'onda = sposta il cursore, doppio clic = nuovo marker;
+   - **↶ Annulla**, **↺ Rifai dai beat**, **Svuota**, poi **✓ Fatto**.
+
+   ![Editor dei marker: forma d'onda, marker e cursore nei due temi](docs/editor_marker.png)
 
    L'ultimo marker è la **fine** del montaggio.
 6. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
-   e l'altro**, esattamente sui fotogrammi dei marker (che restano anche nel montato).
-   Se hai saltato il punto 5, taglia direttamente sui beat dello stile scelto.
+   e l'altro**, esattamente sui fotogrammi dei marker. Se hai saltato il punto 5,
+   taglia direttamente sui beat dello stile scelto.
 
-> Puoi ritoccare i marker e premere **Monta** quante volte vuoi: ogni volta nasce una
-> timeline nuova. Una nuova **Analizza** riparte da zero (i marker vecchi non contano più).
+> Puoi riaprire l'editor, ritoccare i marker e premere **Monta** quante volte vuoi:
+> ogni volta nasce una timeline nuova. Una nuova **Analizza** riparte da zero.
+>
+> L'ascolto nell'editor usa il suono di Windows (o `afplay` su Mac). Il clic diretto
+> sulla forma d'onda dipende dalla versione di Resolve: se non risponde, il cursore
+> si sposta con la barra sotto le immagini.
 
 **Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
 ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si

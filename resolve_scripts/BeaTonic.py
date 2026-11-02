@@ -19,7 +19,15 @@ import os
 import re
 import struct
 import subprocess
+import sys
+import time
 import wave
+import zlib
+
+try:
+    import winsound              # ascolto nell'editor dei marker (Windows)
+except ImportError:
+    winsound = None
 
 _LOGO = os.path.join(os.environ.get("APPDATA", ""), "Blackmagic Design",
                      "DaVinci Resolve", "Support", "Fusion", "Scripts", "Utility",
@@ -176,8 +184,12 @@ def _decode_mono(path, sr=11025, af=None, name="_song.wav"):
     if af:
         cmd += ["-af", af]
     subprocess.run(cmd + [out], capture_output=True, creationflags=_NOWIN)
-    w = wave.open(out, "rb")
-    raw = w.readframes(w.getnframes())
+    return _read_wav(out)
+
+
+def _read_wav(p):
+    w = wave.open(p, "rb")
+    raw, sr = w.readframes(w.getnframes()), w.getframerate()
     w.close()
     data = struct.unpack("<%dh" % (len(raw) // 2), raw)
     return [x / 32768.0 for x in data], sr
@@ -542,69 +554,166 @@ def _put_song(mp, song, ns, frames=None):
         pass
 
 
-def marker_timeline(song, ivs, beats, bpos, tag):
-    """Timeline con la sola canzone (intera) e un marker a ogni punto di stacco:
-    rosso = inizio battuta, ciano = beat. Si sistemano a mano prima di montare."""
-    proj = resolve.GetProjectManager().GetCurrentProject()
-    mp = proj.GetMediaPool()
-    new = _new_timeline(mp, "BeaTonic_marker_%s" % tag)
-    if new is None:
-        return None, 0
-    proj.SetCurrentTimeline(new)
-    fps = _tl_fps(new)
-    sec = _clip_dur_sec(song)
-    _put_song(mp, song, new.GetStartFrame(), int(round(sec * fps)) if sec else None)
-    downs = set(t for t, p in zip(beats, bpos) if p == 0)
-    n, used = 0, set()
-    for _, b in ivs:
-        f = int(round(b * fps))
-        if f <= 0 or f in used:
-            continue
-        used.add(f)
-        one = b in downs
+# --------------------------------------------------------------------------
+# Editor dei marker: forma d'onda disegnata come immagine + ascolto
+# --------------------------------------------------------------------------
+PEAKS, PEAK_HZ = [], 200.0   # ampiezza massima ~200 volte al secondo (0..1)
+
+
+def wave_peaks(wav):
+    """Ampiezze per disegnare la forma d'onda, dal wav mono gia' decodificato."""
+    try:
+        sig, sr = _read_wav(wav)
+    except Exception:
+        return [], 200.0
+    st = max(1, int(sr / 200))
+    pk = [max(max(sig[i:i + st]), -min(sig[i:i + st]))
+          for i in range(0, len(sig) - st + 1, st)]
+    srt = sorted(pk)
+    top = (srt[int(0.99 * (len(srt) - 1))] if srt else 1.0) or 1.0
+    return [min(1.0, v / top) for v in pk], float(sr) / st
+
+
+def _png(path, w, h, buf):
+    """PNG RGB scritto a mano (niente librerie): buf = w*h*3 byte."""
+    st = w * 3
+    raw = b"".join(b"\x00" + bytes(buf[y * st:(y + 1) * st]) for y in range(h))
+
+    def chunk(t, d):
+        return (struct.pack(">I", len(d)) + t + d +
+                struct.pack(">I", zlib.crc32(t + d) & 0xffffffff))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" +
+                chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+
+
+_WPAL = {   # colori della forma d'onda per tema
+    "studio": {"bg": "#0b0d11", "band": "#161a2c", "wave": "#5b5398", "tick": "#1d2130",
+               "mark": "#a78bfa", "near": "#ffffff", "cur": "#f59e0b"},
+    "labs": {"bg": "#FBF4FF", "band": "#EDE3F7", "wave": "#B9A6CF", "tick": "#E8DDF2",
+             "mark": "#EE3A5B", "near": "#0E0418", "cur": "#F7A541"},
+}
+
+
+def render_wave(path, w, h, t0, t1, marks, cursor, near=None, beats=(), band=None,
+                theme="studio", ticks=False):
+    """Disegna la canzone tra t0 e t1: forma d'onda, griglia dei beat, marker
+    (quello 'near' evidenziato), cursore e, nella vista generale, la zona ingrandita.
+    ticks=True: marker come tacche corte in alto (vista generale, tanti marker)."""
+    pal = dict((k, bytes(int(v[i:i + 2], 16) for i in (1, 3, 5)))
+               for k, v in _WPAL.get(theme, _WPAL["studio"]).items())
+    st = w * 3
+    buf = bytearray(pal["bg"] * (w * h))
+
+    def vline(x, col, y0=0, y1=h):
+        if 0 <= x < w and y1 > y0:
+            cnt, base = y1 - y0, y0 * st + x * 3
+            for c in range(3):
+                buf[base + c:base + c + cnt * st:st] = bytes([col[c]]) * cnt
+
+    span = (t1 - t0) or 1.0
+
+    def X(t):
+        return int((t - t0) / span * w)
+    if band:
+        for x in range(max(0, X(band[0])), min(w, X(band[1]) + 1)):
+            vline(x, pal["band"])
+    for b in beats:
+        if t0 <= b <= t1:
+            vline(X(b), pal["tick"])
+    n, mid = len(PEAKS), h // 2
+    for x in range(w):
+        a = int((t0 + span * x / w) * PEAK_HZ)
+        seg = PEAKS[max(0, a):min(n, max(a + 1, int((t0 + span * (x + 1) / w) * PEAK_HZ)))]
+        if seg:                              # radice: si vedono anche le parti piano
+            hh = int(math.sqrt(max(seg)) * (mid - 2))
+            vline(x, pal["wave"], mid - hh, mid + hh + 1)
+    for i, m in enumerate(marks):
+        if t0 <= m <= t1:
+            col = pal["near"] if i == near else pal["mark"]
+            if ticks:
+                vline(X(m), col, 0, max(4, h // 4))
+            else:
+                vline(X(m), col)
+                vline(X(m) + 1, col)
+    vline(X(cursor), pal["cur"])
+    _png(path, w, h, buf)
+
+
+PLAY = {"on": False, "t0": 0.0, "wall": 0.0, "end": 0.0, "proc": None, "n": 0, "src": None}
+
+
+def _ffplay():
+    exe = "ffplay.exe" if os.name == "nt" else "ffplay"
+    p = os.path.join(os.path.dirname(FFMPEG or ""), exe)
+    return p if os.path.exists(p) else None
+
+
+def stop_play():
+    if winsound:
         try:
-            if new.AddMarker(f, "Red" if one else "Cyan", "1" if one else "beat",
-                             "BeaTonic: punto di stacco", 1):
-                n += 1
+            winsound.PlaySound(None, 0)
         except Exception:
             pass
-    return new, n
-
-
-def find_timeline(uid):
-    proj = resolve.GetProjectManager().GetCurrentProject()
-    for i in range(1, int(proj.GetTimelineCount() or 0) + 1):
-        t = proj.GetTimelineByIndex(i)
+    if PLAY.get("proc"):
         try:
-            if t and (t.GetUniqueId() == uid or t.GetName() == uid):
-                return t
+            PLAY["proc"].terminate()
         except Exception:
             pass
-    return None
+    PLAY.update(on=False, proc=None)
 
 
-def marker_cuts(tl):
-    """Punti di stacco = TUTTI i marker della timeline, anche quelli aggiunti a mano,
-    piu' quelli messi sulla clip della canzone (M con la clip selezionata).
-    Ritorna ([frame dall'inizio, in ordine], {frame: info marker})."""
-    marks = {}
+def play_from(song_path, t):
+    """Suona la canzone da t (max 2 minuti per volta). Su Windows dentro al plugin
+    (winsound), su Mac con afplay, altrimenti ffplay."""
+    stop_play()
+    src = os.path.join(_TMP, "_play.wav")
+    if PLAY["src"] != song_path or not os.path.exists(src):
+        subprocess.run([FFMPEG, "-y", "-i", song_path, "-ac", "1", "-ar", "22050", src],
+                       capture_output=True, creationflags=_NOWIN)
+        PLAY["src"] = song_path
     try:
-        for f, info in (tl.GetMarkers() or {}).items():
-            marks[int(round(float(f)))] = info
+        w = wave.open(src, "rb")
     except Exception:
-        pass
-    ns = tl.GetStartFrame()
+        return False
+    sr, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    w.setpos(min(w.getnframes(), int(t * sr)))
+    data = w.readframes(int(120 * sr))
+    w.close()
+    PLAY["n"] += 1
+    out = os.path.join(_TMP, "_play_%d.wav" % (PLAY["n"] % 2))   # due file a turno
+    o = wave.open(out, "wb")
+    o.setnchannels(ch); o.setsampwidth(sw); o.setframerate(sr); o.writeframes(data)
+    o.close()
     try:
-        for it in tl.GetItemListInTrack("audio", 1) or []:
-            off = it.GetStart() - ns
-            for f, info in (it.GetMarkers() or {}).items():
-                marks.setdefault(off + int(round(float(f))), info)
+        if winsound:
+            winsound.PlaySound(out, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        elif sys.platform == "darwin":
+            PLAY["proc"] = subprocess.Popen(["afplay", out])
+        elif _ffplay():
+            PLAY["proc"] = subprocess.Popen([_ffplay(), "-nodisp", "-autoexit",
+                                             "-loglevel", "quiet", out], creationflags=_NOWIN)
+        else:
+            return False
     except Exception:
-        pass
-    return sorted(f for f in marks if f > 0), marks
+        return False
+    PLAY.update(on=True, t0=t, wall=time.time(), end=t + len(data) / float(sr * ch * sw))
+    return True
 
 
-def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, marks=None):
+def play_time():
+    """Dove si trova l'ascolto adesso (s), o None se non sta suonando."""
+    if not PLAY["on"]:
+        return None
+    t = PLAY["t0"] + time.time() - PLAY["wall"]
+    if t >= PLAY["end"]:
+        PLAY["on"] = False
+        return PLAY["end"]
+    return t
+
+
+def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
     """Monta le shot negli intervalli ivs [(inizio s, fine s), ...] che partono da 0.
     Ogni stacco cade ESATTAMENTE sul suo fotogramma: dopo ogni clip si legge dove e'
     finita davvero e la successiva si calcola per arrivare al punto dopo (nessuno
@@ -717,13 +826,6 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, marks=None):
             break
     frames = cur - ns
     _put_song(mp, song, ns, frames)             # canzone su A1, lunga quanto il montaggio
-    for f, info in sorted((marks or {}).items()):
-        if 0 < f <= frames:                     # i marker restano anche nel montato
-            try:
-                new.AddMarker(f, info.get("color", "Blue"), info.get("name", ""),
-                              info.get("note", ""), 1)
-            except Exception:
-                pass
     return ("Montaggio '%s' creato: %d stacchi su %.1fs, %s."
             % (new.GetName(), ok, frames / tl_fps, fmt))
 
@@ -790,8 +892,12 @@ _PAL = {
 _TMPL = """
 * { font-family:%(font)s; font-size:13px; color:%(fg)s; outline:none; }
 QWidget { background-color:%(bg)s; }
-QLabel#Header { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
+QLabel#Header, QLabel#EdHeader { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
 QPushButton#Logo { background:transparent; border:0; margin:0px; }
+QPushButton#Over, QPushButton#Wave { background:transparent; border:0; margin:0px; padding:0px; }
+QLabel#EdInfo, QLabel#EdHint { color:%(muted)s; }
+QSlider::groove:horizontal { height:6px; background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:3px; }
+QSlider::handle:horizontal { background:%(accent)s; width:14px; margin:-6px 0px; border-radius:7px; }
 QPushButton#ThemeBtn { background:transparent; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:4px 9px; color:%(muted)s; font-weight:700; }
 QPushButton#ThemeBtn:hover { border:%(bw)s solid %(accent)s; color:%(fg)s; }
 QLabel#Src { color:%(muted)s; padding:4px 2px; }
@@ -801,8 +907,8 @@ QComboBox::drop-down { border:0; width:18px; }
 QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; margin:0px 3px; }
 QPushButton:hover { background:%(border)s; }
 QPushButton:pressed { background:%(tree)s; }
-QPushButton#Analyze, QPushButton#Make { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
-QPushButton#Analyze:hover, QPushButton#Make:hover { background:%(primaryHover)s; }
+QPushButton#Analyze, QPushButton#Make, QPushButton#AddM { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
+QPushButton#Analyze:hover, QPushButton#Make:hover, QPushButton#AddM:hover { background:%(primaryHover)s; }
 QPushButton#Close { color:%(muted)s; }
 QCheckBox { spacing:6px; margin:0px 3px; }
 QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:%(bw)s solid %(border2)s; background:%(panel)s; }
@@ -847,14 +953,14 @@ win = disp.AddWindow({
             ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Mark", "Text": "◆  Marker sui beat", "Weight": 3}),
+            ui.Button({"ID": "Mark", "Text": "◆  Marker", "Weight": 3}),
             ui.Button({"ID": "Make", "Text": "▶  Monta", "Weight": 3}),
             ui.Button({"ID": "Close", "Text": "Chiudi", "Weight": 1}),
         ]),
 
         ui.TextEdit({"ID": "Log", "Weight": 1, "ReadOnly": True,
                      "Text": "1) Seleziona clip + canzone  2) Analizza  "
-                             "3) Marker sui beat: controlli e sistemi i tagli (facoltativo)  "
+                             "3) Marker: vedi la canzone e sistemi i tagli (facoltativo)  "
                              "4) Monta."}),
         ui.Label({"ID": "Status", "Text": "Pronto.", "Weight": 0, "WordWrap": True}),
     ]),
@@ -877,7 +983,13 @@ for o in ORDERS:
     itm["Ord"].AddItem(o)
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
-MARK_UID = None        # timeline dei marker creata con "Marker sui beat"
+MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
+UNDO = []           # copie di MARKS prima di ogni modifica ("Annulla")
+CURSOR = [0.0]      # cursore dell'editor (s)
+ED = {}             # finestra dell'editor dei marker (creata alla prima apertura)
+ED_W, OV_H, WV_H = 900, 44, 140
+ZOOMS = {"Zoom 4 s": 4.0, "Zoom 8 s": 8.0, "Zoom 16 s": 16.0, "Zoom 32 s": 32.0}
+SNAP = 0.12         # s: "aggancia al beat" se un beat e' cosi' vicino
 
 
 def set_status(m):
@@ -904,8 +1016,14 @@ def on_refresh(ev=None):
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPOS, BPM, INTENS, MARK_UID
-    MARK_UID = None                      # nuova analisi: i marker vecchi non valgono piu'
+    global SHOTS, BEATS, BPOS, BPM, INTENS, PEAKS, PEAK_HZ
+    stop_play()                          # nuova analisi: i marker vecchi non valgono piu'
+    MARKS[:], UNDO[:], CURSOR[0] = [], [], 0.0
+    if ED:
+        try:
+            ED["win"].Hide()
+        except Exception:
+            pass
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -919,11 +1037,12 @@ def on_analyze(ev):
     SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
+    PEAKS, PEAK_HZ = wave_peaks(os.path.join(_TMP, "_song.wav"))
     bars = sum(1 for p in BPOS if p == 0)
     set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
-            "Ora scegli stile/durata/formato/ordine. Premi 'Marker sui beat' per vedere "
-            "e sistemare i tagli sulla canzone, oppure direttamente 'Monta'."
+            "Ora scegli stile/durata/formato/ordine. Premi 'Marker' per vedere la canzone "
+            "e sistemare i tagli, oppure direttamente 'Monta'."
             % (len(SHOTS), len(VIDEOS),
                ("%d stacchi + %d cambi d'inquadratura" % (n_cut, n_ref)) if split else "intere",
                BPM, len(BEATS), bars, MIN_CUT))
@@ -937,49 +1056,393 @@ def _dur():
         return 30.0
 
 
-def on_mark(ev):
-    """Timeline con la canzone e i marker sui punti di stacco, da controllare."""
-    global MARK_UID
-    if not BEATS or not SONG:
-        set_log("Prima premi 'Analizza'."); return
-    style = itm["Style"].CurrentText
-    ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS)
-    if not ivs:
-        set_log("Nessun punto di stacco: controlla la canzone o la durata."); return
-    tl, n = marker_timeline(SONG, ivs, BEATS, BPOS, style.split()[0])
-    if tl is None:
-        set_log("Impossibile creare la timeline dei marker."); return
+# --------------------------------------------------------------------------
+# Editor dei marker (finestra a parte): la canzone con la forma d'onda, un solo
+# tipo di marker, ogni marker = un cambio clip
+# --------------------------------------------------------------------------
+def _tc(t):
+    return "%d:%05.2f" % (int(t // 60), t % 60)
+
+
+def _song_dur():
+    return len(PEAKS) / PEAK_HZ if PEAKS else 0.0
+
+
+def _proj_fps():
     try:
-        MARK_UID = tl.GetUniqueId()
+        f = float(resolve.GetProjectManager().GetCurrentProject().GetSetting("timelineFrameRate"))
     except Exception:
-        MARK_UID = tl.GetName()
-    set_log("TIMELINE '%s': canzone + %d marker (stile %s, %.0fs).\n\n"
-            "Ascoltala e sistema i tagli come vuoi:\n"
-            "• ROSSO = inizio battuta, CIANO = beat\n"
-            "• spostare: trascina il marker sul righello\n"
-            "• togliere: clic sul marker e Canc\n"
-            "• aggiungere: metti la testina dove vuoi e premi M\n"
-            "L'ultimo marker e' la FINE del montaggio.\n\n"
-            "Quando ti va bene premi 'Monta': mette una clip tra un marker e l'altro."
-            % (tl.GetName(), n, style.split()[0], _dur()))
-    set_status("Marker pronti: %d. Sistemali, poi 'Monta'." % n)
+        f = 25.0
+    return f or 25.0
+
+
+def marks_from_beats():
+    return [b for _, b in _intervals(BEATS, BPOS, itm["Style"].CurrentText, _dur(), INTENS)]
+
+
+def _view():
+    """Finestra di tempo del dettaglio, centrata sul cursore."""
+    d = _song_dur()
+    z = min(d, ZOOMS.get(ED["itm"]["Zoom"].CurrentText, 8.0)) or 1.0
+    t0 = max(0.0, min(CURSOR[0] - z / 2.0, d - z))
+    return t0, t0 + z
+
+
+def _nearest(t):
+    if not MARKS:
+        return None
+    return min(range(len(MARKS)), key=lambda i: abs(MARKS[i] - t))
+
+
+def ed_refresh():
+    if not ED or not PEAKS:
+        return
+    it = ED["itm"]
+    t0, t1 = _view()
+    near = _nearest(CURSOR[0])
+    if near is not None and not t0 <= MARKS[near] <= t1:
+        near = None                          # evidenziato solo se si vede
+    ED["n"] += 1
+    po = os.path.join(_TMP, "_ov%d.png" % ED["n"])
+    pw = os.path.join(_TMP, "_wv%d.png" % ED["n"])
+    render_wave(po, ED_W, OV_H, 0.0, _song_dur(), MARKS, CURSOR[0], band=(t0, t1),
+                theme=THEME, ticks=True)
+    render_wave(pw, ED_W, WV_H, t0, t1, MARKS, CURSOR[0], near, BEATS, theme=THEME)
+    try:
+        it["Over"].Icon = ui.Icon({"File": po})
+        it["Over"].IconSize = [ED_W, OV_H]
+        it["Wave"].Icon = ui.Icon({"File": pw})
+        it["Wave"].IconSize = [ED_W, WV_H]
+    except Exception:
+        pass
+    for p in ("_ov%d.png", "_wv%d.png"):     # file nuovi a ogni disegno: niente cache di Qt
+        try:
+            os.remove(os.path.join(_TMP, p % (ED["n"] - 3)))
+        except OSError:
+            pass
+    gaps = [b - a for a, b in zip([0.0] + MARKS, MARKS)]
+    it["EdInfo"].Text = ("cursore %s   ·   %d marker%s   ·   vista %s – %s"
+                         % (_tc(CURSOR[0]), len(MARKS),
+                            ("   ·   stacco più corto %.2f s" % min(gaps)) if gaps else "",
+                            _tc(t0), _tc(t1)))
+
+
+def _set_cursor(t, from_slider=False):
+    CURSOR[0] = max(0.0, min(_song_dur(), t))
+    if not from_slider:
+        ED["lock"] = True
+        try:
+            ED["itm"]["Pos"].Value = int(round(CURSOR[0] * 100))
+        except Exception:
+            pass
+        ED["lock"] = False
+    ed_refresh()
+
+
+def _change(fn):
+    """Modifica i marker salvando prima una copia per 'Annulla'."""
+    UNDO.append(list(MARKS))
+    del UNDO[:-200]
+    fn()
+    MARKS.sort()
+
+
+def _ev_x(ev):
+    """Ascissa del clic sull'immagine (il formato dell'evento non e' documentato,
+    si provano le forme possibili; se non c'e', restano cursore e pulsanti)."""
+    for k in ("Pos", "pos", "Position", "MousePos"):
+        try:
+            p = ev[k]
+        except Exception:
+            continue
+        if isinstance(p, dict):
+            for kk in (1, 1.0, "1", "x", "X"):
+                if kk in p:
+                    return float(p[kk])
+        if isinstance(p, (list, tuple)) and p:
+            return float(p[0])
+    for k in ("X", "x"):
+        try:
+            return float(ev[k])
+        except Exception:
+            pass
+    return None
+
+
+def _add_marker(t):
+    if ED["itm"]["Snap"].Checked and BEATS:
+        b = min(BEATS, key=lambda v: abs(v - t))
+        if abs(b - t) <= SNAP:
+            t = b                            # premuto un filo prima o dopo: sul beat
+    if t <= 0 or any(abs(m - t) < 1.0 / _proj_fps() for m in MARKS):
+        return
+    _change(lambda: MARKS.append(t))
+    if PLAY["on"]:
+        ed_refresh()
+    else:
+        _set_cursor(t)
+
+
+def _near_visible():
+    i = _nearest(CURSOR[0])
+    t0, t1 = _view()
+    return i if i is not None and t0 <= MARKS[i] <= t1 else None
+
+
+def _nudge(frames):
+    i = _near_visible()
+    if i is None:
+        return
+    t = max(0.01, MARKS[i] + frames / _proj_fps())
+
+    def mv():
+        MARKS[i] = t
+    _change(mv)
+    _set_cursor(t)
+
+
+def ed_pos(ev):
+    if not ED.get("lock"):
+        _set_cursor(ED["itm"]["Pos"].Value / 100.0, from_slider=True)
+
+
+def ed_wave_click(ev):
+    x = _ev_x(ev)
+    if x is None:
+        return
+    t0, t1 = _view()
+    t = t0 + (t1 - t0) * x / ED_W
+    i = _nearest(t)
+    if i is not None and abs(MARKS[i] - t) * ED_W / (t1 - t0) <= 6:
+        t = MARKS[i]                         # clic su un marker: lo prende
+    _set_cursor(t)
+
+
+def ed_wave_dbl(ev):
+    x = _ev_x(ev)
+    if x is not None:
+        t0, t1 = _view()
+        _add_marker(t0 + (t1 - t0) * x / ED_W)
+
+
+def ed_over_click(ev):
+    x = _ev_x(ev)
+    if x is not None:
+        _set_cursor(_song_dur() * x / ED_W)
+
+
+def ed_add(ev):
+    pt = play_time()
+    _add_marker(pt if pt is not None else CURSOR[0])
+
+
+def ed_del(ev):
+    i = _near_visible()
+    if i is not None:
+        _change(lambda: MARKS.pop(i))
+        ed_refresh()
+
+
+def ed_prev(ev):
+    p = [m for m in MARKS if m < CURSOR[0] - 0.005]
+    if p:
+        _set_cursor(p[-1])
+
+
+def ed_next(ev):
+    n = [m for m in MARKS if m > CURSOR[0] + 0.005]
+    if n:
+        _set_cursor(n[0])
+
+
+def ed_play(ev):
+    if not play_from(SONG.GetClipProperty("File Path") or "", CURSOR[0]):
+        ED["itm"]["EdHint"].Text = "Ascolto non disponibile su questo computer."
+        return
+    try:
+        ED["timer"].Start()
+    except Exception:
+        pass
+    try:
+        ED["itm"]["AddM"].SetFocus()         # cosi' anche la barra spaziatrice mette un marker
+    except Exception:
+        pass
+
+
+def ed_stop(ev):
+    t = play_time()
+    stop_play()
+    if t is not None:
+        _set_cursor(t)
+
+
+def ed_tick(ev=None):
+    t = play_time()
+    if t is None:
+        try:
+            ED["timer"].Stop()
+        except Exception:
+            pass
+        return
+    _set_cursor(t)
+
+
+def ed_undo(ev):
+    if UNDO:
+        MARKS[:] = UNDO.pop()
+        ed_refresh()
+
+
+def ed_regen(ev):
+    new = marks_from_beats()
+
+    def put():
+        MARKS[:] = new
+    _change(put)
+    ed_refresh()
+
+
+def ed_clear(ev):
+    _change(lambda: MARKS.__delitem__(slice(None)))
+    ed_refresh()
+
+
+def ed_close(ev=None):
+    stop_play()
+    try:
+        ED["win"].Hide()
+    except Exception:
+        pass
+    set_log("%d marker pronti: ogni marker è un cambio clip, l'ultimo è la fine.\n"
+            "Premi 'Monta' per mettere una clip tra un marker e l'altro." % len(MARKS))
+    set_status("Marker: %d. Premi 'Monta'." % len(MARKS))
+
+
+def _editor_layout(rich):
+    ev = {"Events": {"MousePress": True, "MouseDoubleClick": True}} if rich else {}
+
+    def img(id_, h):
+        d = {"ID": id_, "Flat": True, "Weight": 0,
+             "MinimumSize": [ED_W, h], "MaximumSize": [ED_W, h]}
+        d.update(ev)
+        return ui.Button(d)
+    slider = {"ID": "Pos", "Weight": 0}
+    if rich:
+        slider["Orientation"] = "Horizontal"
+    return ui.VGroup({"Spacing": 6, "Margin": 14}, [
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
+            ui.Label({"ID": "EdHeader", "Text": "Marker", "Weight": 0}),
+            ui.Label({"ID": "EdInfo", "Text": "", "Weight": 1,
+                      "Alignment": {"AlignRight": True, "AlignVCenter": True}}),
+        ]),
+        img("Over", OV_H),
+        img("Wave", WV_H),
+        ui.Slider(slider),
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
+            ui.Button({"ID": "Play", "Text": "▶  Ascolta", "Weight": 2}),
+            ui.Button({"ID": "Stop", "Text": "■  Stop", "Weight": 2}),
+            ui.Button({"ID": "PrevM", "Text": "◀ Marker", "Weight": 2}),
+            ui.Button({"ID": "NextM", "Text": "Marker ▶", "Weight": 2}),
+            ui.Button({"ID": "AddM", "Text": "+  Marker", "Weight": 3}),
+            ui.Button({"ID": "DelM", "Text": "–  Marker", "Weight": 2}),
+            ui.Button({"ID": "NudL", "Text": "◀ 1 fot.", "Weight": 2}),
+            ui.Button({"ID": "NudR", "Text": "1 fot. ▶", "Weight": 2}),
+        ]),
+        ui.HGroup({"Weight": 0, "Spacing": 0}, [
+            ui.ComboBox({"ID": "Zoom", "Weight": 2}),
+            ui.CheckBox({"ID": "Snap", "Text": "aggancia al beat", "Checked": True, "Weight": 3}),
+            ui.Button({"ID": "Undo", "Text": "↶  Annulla", "Weight": 2}),
+            ui.Button({"ID": "Regen", "Text": "↺  Rifai dai beat", "Weight": 3}),
+            ui.Button({"ID": "Clear", "Text": "Svuota", "Weight": 2}),
+            ui.Button({"ID": "EdClose", "Text": "✓  Fatto", "Weight": 2}),
+        ]),
+        ui.Label({"ID": "EdHint", "Weight": 0, "WordWrap": True, "Text": (
+            "Ogni marker è un cambio clip. Premi Ascolta e poi + Marker a tempo: si aggancia "
+            "al beat più vicino. Il cursore (linea arancione) si sposta con la barra sotto le "
+            "immagini o con un clic sulla forma d'onda; doppio clic = nuovo marker. "
+            "Togli e ◀ 1 fot. / 1 fot. ▶ agiscono sul marker evidenziato, il più vicino "
+            "al cursore.")}),
+    ])
+
+
+def _build_editor():
+    ed = None
+    for rich in (True, False):               # se la build non accetta eventi/orientamento
+        try:
+            ed = disp.AddWindow({"ID": "BTMarkWin", "WindowTitle": "BeaTonic · Marker",
+                                 "Geometry": [150, 130, ED_W + 40, 470],
+                                 "StyleSheet": STYLE_FOR[THEME]}, [_editor_layout(rich)])
+            break
+        except Exception:
+            ed = None
+    if ed is None:
+        return False
+    it = ed.GetItems()
+    ED.update(win=ed, itm=it, n=0, lock=False, timer=None)
+    for z in ZOOMS:
+        it["Zoom"].AddItem(z)
+    try:
+        it["Zoom"].CurrentIndex = 1          # 8 s
+    except Exception:
+        pass
+    for k, fn in (("Play", ed_play), ("Stop", ed_stop), ("PrevM", ed_prev),
+                  ("NextM", ed_next), ("AddM", ed_add), ("DelM", ed_del),
+                  ("NudL", lambda e: _nudge(-1)), ("NudR", lambda e: _nudge(1)),
+                  ("Undo", ed_undo), ("Regen", ed_regen), ("Clear", ed_clear),
+                  ("EdClose", ed_close)):
+        setattr(getattr(ed.On, k), "Clicked", fn)
+    ed.On.Pos.ValueChanged = ed_pos
+    ed.On.Zoom.CurrentIndexChanged = lambda e: ed_refresh()
+    ed.On.BTMarkWin.Close = ed_close
+    for el, evn, fn in (("Wave", "MousePress", ed_wave_click),
+                        ("Wave", "MouseDoubleClick", ed_wave_dbl),
+                        ("Over", "MousePress", ed_over_click)):
+        try:
+            setattr(getattr(ed.On, el), evn, fn)
+        except Exception:
+            pass
+    try:                                     # timer per far scorrere il cursore mentre suona
+        ED["timer"] = ui.Timer({"ID": "BTTimer", "Interval": 100})
+    except Exception:
+        ED["timer"] = None
+    for bind in (lambda: setattr(ed.On.BTTimer, "Timeout", ed_tick),
+                 lambda: setattr(disp.On, "Timeout", ed_tick)):
+        try:
+            bind()
+        except Exception:
+            pass
+    return True
+
+
+def on_mark(ev):
+    """Apre l'editor dei marker: la canzone con la forma d'onda e i punti di stacco."""
+    if not BEATS or not SONG or not PEAKS:
+        set_log("Prima premi 'Analizza'."); return
+    if not MARKS:
+        MARKS[:] = marks_from_beats()
+    if not ED and not _build_editor():
+        set_log("Impossibile aprire l'editor dei marker."); return
+    try:
+        ED["itm"]["Pos"].Minimum = 0
+        ED["itm"]["Pos"].Maximum = max(1, int(_song_dur() * 100))
+    except Exception:
+        pass
+    ED["win"].Show()
+    _set_cursor(CURSOR[0])
+    set_log("EDITOR MARKER: %d marker (stile %s). Ogni marker è un cambio clip.\n"
+            "Sistemali, poi 'Fatto' e 'Monta'."
+            % (len(MARKS), itm["Style"].CurrentText.split()[0]))
+    set_status("Editor marker aperto.")
 
 
 def on_make(ev):
     if not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     style = itm["Style"].CurrentText
-    marks = None
-    mk = find_timeline(MARK_UID) if MARK_UID else None
-    if mk is not None:                   # i marker (come li hai lasciati) comandano
-        cuts, marks = marker_cuts(mk)
-        if not cuts:
-            set_log("La timeline '%s' non ha marker: aggiungine col tasto M oppure "
-                    "ricreali con 'Marker sui beat'." % mk.GetName()); return
-        fps = _tl_fps(mk)
-        bounds = [0] + cuts
-        ivs = [(a / fps, b / fps) for a, b in zip(bounds, bounds[1:])]
-        tag, src = "marker", "dai %d marker di '%s'" % (len(cuts), mk.GetName())
+    if MARKS:                            # i marker dell'editor (come li hai lasciati)
+        bounds = [0.0] + MARKS
+        ivs = list(zip(bounds, bounds[1:]))
+        tag, src = "marker", "dai %d marker dell'editor" % len(MARKS)
     else:
         if not BEATS:
             set_log("Prima premi 'Analizza'."); return
@@ -988,12 +1451,18 @@ def on_make(ev):
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, ivs, tag, itm["Fmt"].CurrentText,
                   ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
-                  bool(itm["Reuse"].Checked), set_log, marks)
+                  bool(itm["Reuse"].Checked), set_log)
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg[:80])
 
 
 def on_close(ev):
+    stop_play()
+    if ED:
+        try:
+            ED["win"].Hide()
+        except Exception:
+            pass
     disp.ExitLoop()
 
 
@@ -1023,6 +1492,12 @@ def apply_theme(name):
                                 else "☾  Tema Studio")
     except Exception:
         pass
+    if ED:                               # anche l'editor dei marker (e i suoi colori)
+        try:
+            ED["win"].SetStyleSheet(STYLE_FOR[name])
+        except Exception:
+            pass
+        ed_refresh()
     save_theme(name)
 
 
