@@ -78,10 +78,12 @@ def scene_cuts(path, thresh=0.3):
     return [float(m) for m in re.findall(r"pts_time:([0-9.]+)", txt)]
 
 
-def _decode_mono(path, sr=11025):
-    out = os.path.join(_TMP, "_song.wav")
-    subprocess.run([FFMPEG, "-y", "-i", path, "-ac", "1", "-ar", str(sr), out],
-                   capture_output=True, creationflags=_NOWIN)
+def _decode_mono(path, sr=11025, af=None, name="_song.wav"):
+    out = os.path.join(_TMP, name)
+    cmd = [FFMPEG, "-y", "-i", path, "-ac", "1", "-ar", str(sr)]
+    if af:
+        cmd += ["-af", af]
+    subprocess.run(cmd + [out], capture_output=True, creationflags=_NOWIN)
     w = wave.open(out, "rb")
     raw = w.readframes(w.getnframes())
     w.close()
@@ -89,72 +91,156 @@ def _decode_mono(path, sr=11025):
     return [x / 32768.0 for x in data], sr
 
 
-def _onset_rms(sig, sr, hop=128):
-    E, RMS = [], []
-    for i in range(0, len(sig) - hop, hop):
-        e = 0.0
-        for j in range(i, i + hop):
-            e += sig[j] * sig[j]
-        E.append(e)
-        RMS.append((e / hop) ** 0.5)
-    env = [max(0.0, E[k] - E[k - 1]) for k in range(1, len(E))]  # flusso d'energia
-    return env, RMS[1:], sr / hop
+def _energy(sig, hop):
+    return [sum(x * x for x in sig[i:i + hop]) for i in range(0, len(sig) - hop, hop)]
 
 
-def beat_grid(path):
-    """Segue i TRANSIENTI della forma d'onda (non una griglia a tempo fisso): cosi'
-    si adatta ai cambi di BPM e, grazie al GATE sull'energia, nei punti in cui la
-    canzone sfuma/tace NON mette onset. Ritorna (bpm_medio, [tempi onset in s])."""
-    sig, sr = _decode_mono(path)
-    env, rms, fps = _onset_rms(sig, sr)
-    if len(env) < 10:
-        return 0.0, []
-    envmax = max(env) or 1.0
-    med = sorted(r for r in rms if r > 0)
-    rms_med = med[len(med) // 2] if med else 0.0
-    gate = 0.12 * rms_med            # sotto = silenzio/sfumato -> niente onset
-    win = max(1, int(fps * 0.8)); w = 3
-    onsets = []
-    for i in range(w, len(env) - w):
-        if rms[i] < gate:
-            continue
-        if env[i] < max(env[i - w:i + w + 1]):
-            continue                 # non e' un massimo locale
-        a = max(0, i - win); b = min(len(env), i + win)
-        loc = env[a:b]; m = sum(loc) / len(loc)
-        sd = (sum((x - m) ** 2 for x in loc) / len(loc)) ** 0.5
-        if env[i] > m + 1.2 * sd and env[i] > 0.02 * envmax:
-            onsets.append(i / fps)
-    times = []
-    for t in onsets:                 # togli doppioni troppo vicini
-        if not times or t - times[-1] > 0.15:
-            times.append(round(t, 3))
-    if len(times) > 2:
-        avg = sum(times[i + 1] - times[i] for i in range(len(times) - 1)) / (len(times) - 1)
-        bpm = 60.0 / avg if avg else 0.0
-    else:
-        bpm = 0.0
-    # INTENSITA' per onset: energia RMS locale (smussata ~1s) normalizzata 0..1.
-    # Serve allo stile "dinamico" per seguire i sali/scendi del brano.
+def _flux(E):
+    """Forza dei colpi: aumento di energia in scala logaritmica (i colpi deboli
+    contano, quelli fortissimi non schiacciano tutto il resto)."""
+    m = (sum(E) / len(E)) if E else 1.0
+    m = m or 1e-9
+    L = [math.log(1.0 + 100.0 * e / m) for e in E]
+    return [0.0] + [max(0.0, L[k] - L[k - 1]) for k in range(1, len(L))]
+
+
+def _movavg(x, half):
     cs = [0.0]
-    for v in rms:
+    for v in x:
         cs.append(cs[-1] + v)
-    wsm = max(1, int(fps * 0.5))
+    n = len(x)
+    return [(cs[min(n, i + half + 1)] - cs[max(0, i - half)]) /
+            (min(n, i + half + 1) - max(0, i - half)) for i in range(n)]
 
-    def _loc(fr):
-        a = max(0, fr - wsm); b = min(len(rms), fr + wsm + 1)
-        return (cs[b] - cs[a]) / (b - a) if b > a else 0.0
 
-    oe = [_loc(min(len(rms) - 1, int(t * fps))) for t in times]
-    if oe:
-        srt = sorted(oe)
-        lo = srt[int(0.1 * len(srt))]
-        hi = srt[min(len(srt) - 1, int(0.9 * len(srt)))]
-        rng = (hi - lo) or 1.0
-        intens = [max(0.0, min(1.0, (e - lo) / rng)) for e in oe]
+def _tempo(o, fps):
+    """Periodo del beat (in frame) per autocorrelazione dei colpi, preferendo il
+    'beat che si sente' (~90-150 BPM): su un pezzo frenetico prende il mezzo tempo,
+    non i sedicesimi del charleston."""
+    import operator
+    n = len(o)
+    m = sum(o) / n
+    x = [v - m for v in o]
+    lo, hi = int(fps * 60 / 200), int(fps * 60 / 55)
+    ac = {}
+    for lag in range(max(1, lo - 1), min(hi + 1, n - 1) + 1):
+        ac[lag] = sum(map(operator.mul, x[lag:], x[:-lag]))
+    best, bl = None, lo
+    for lag in range(lo, hi + 1):
+        if lag not in ac:
+            continue
+        bpm = 60.0 * fps / lag
+        w = math.exp(-0.5 * (math.log2(bpm / 120.0) / 0.9) ** 2)
+        if best is None or ac[lag] * w > best:
+            best, bl = ac[lag] * w, lag
+    bpm = 60.0 * fps / bl
+    half = int(round(bl / 2.0)); dbl = bl * 2
+    if bpm < 85 and half in ac and ac[half] > 0.5 * ac[bl]:
+        bl = half                                   # troppo lento: raddoppia
+    elif bpm > 165 and dbl in ac and ac[dbl] > 0.5 * ac[bl]:
+        bl = dbl                                    # troppo veloce: dimezza
+    a, b, c = ac.get(bl - 1), ac.get(bl), ac.get(bl + 1)
+    if a is not None and c is not None and (a - 2 * b + c) != 0:
+        return bl + 0.5 * (a - c) / (a - 2 * b + c)  # periodo frazionario
+    return float(bl)
+
+
+def _beat_track(o, P, tight=100.0):
+    """Beat tracking a programmazione dinamica (Ellis 2007): sceglie la sequenza
+    di beat che cade sui colpi forti restando il piu' regolare possibile intorno
+    al periodo P (tollera piccoli cambi di tempo, ignora i colpi fuori griglia)."""
+    n = len(o)
+    lo, hi = max(1, int(round(P / 2))), int(round(2 * P))
+    pen = [0.0] * (hi + 1)
+    for d in range(1, hi + 1):
+        pen[d] = -tight * math.log(d / P) ** 2
+    thresh = 0.01 * (max(o) or 1.0)
+    score, back = [0.0] * n, [-1] * n
+    first = True
+    for t in range(n):
+        best, bp = None, -1
+        for p in range(max(0, t - hi), t - lo + 1):
+            v = score[p] + pen[t - p]
+            if best is None or v > best:
+                best, bp = v, p
+        if t - hi < 0:                              # beat precedente "prima dell'inizio"
+            dmin = max(lo, t + 1)
+            if dmin <= hi:
+                v0 = max(pen[d] for d in range(dmin, hi + 1))
+                if best is None or v0 > best:
+                    best, bp = v0, -1
+        score[t] = o[t] + (best if best is not None else 0.0)
+        if first and o[t] < thresh:
+            back[t] = -1
+        else:
+            back[t] = bp
+            first = False
+    peaks = [score[t] for t in range(1, n - 1) if score[t - 1] <= score[t] >= score[t + 1]]
+    if not peaks:
+        return []
+    med = sorted(peaks)[len(peaks) // 2]
+    last = max(t for t in range(1, n - 1)
+               if score[t - 1] <= score[t] >= score[t + 1] and score[t] >= 0.5 * med)
+    beats, t = [], last
+    while t >= 0:
+        beats.append(t)
+        t = back[t]
+    beats = beats[::-1]
+    # togli i beat deboli in testa e in coda (la catena li "inventa" oltre la musica)
+    st = [max(o[max(0, b - 2):b + 3]) for b in beats]
+    thr = 0.5 * (sum(v * v for v in st) / len(st)) ** 0.5 if st else 0.0
+    a, z = 0, len(beats)
+    while a < z and st[a] < thr:
+        a += 1
+    while z > a and st[z - 1] < thr:
+        z -= 1
+    return beats[a:z]
+
+
+def beat_grid(path, hop=128):
+    """'Ascolta' la canzone: trova il tempo, la griglia dei beat e le battute.
+    Ritorna (bpm, [tempi beat s], [posizione nella battuta 0..3], [intensita' 0..1]).
+    Dove la canzone tace o sfuma non mette beat (gate sull'energia)."""
+    sig, sr = _decode_mono(path)
+    low, _ = _decode_mono(path, af="lowpass=f=150,lowpass=f=150", name="_song_low.wav")
+    E, EL = _energy(sig, hop), _energy(low, hop)
+    n = min(len(E), len(EL))
+    if n < 50:
+        return 0.0, [], [], []
+    fps = float(sr) / hop
+    fb, fl = _flux(E[:n]), _flux(EL[:n])
+    o = [b + l for b, l in zip(fb, fl)]             # la cassa (bassi) conta doppio
+    base = _movavg(o, int(fps * 0.2))
+    o = [max(0.0, v - m) for v, m in zip(o, base)]  # solo i colpi sopra la media locale
+    sd = (sum(v * v for v in o) / n) ** 0.5 or 1.0
+    o = [v / sd for v in o]
+    o = [o[0]] + [0.25 * o[i - 1] + 0.5 * o[i] + 0.25 * o[i + 1]
+                  for i in range(1, n - 1)] + [o[-1]]
+    P = _tempo(o, fps)
+    bf = _beat_track(o, P)
+    if len(bf) < 4:
+        return 0.0, [], [], []
+    # battute: il "1" e' dove la cassa e' piu' forte (fase 0..3 con piu' bassi)
+    lowstr = [max(fl[max(0, f - 2):f + 3]) for f in bf]
+    phase = max(range(4), key=lambda k: sum(lowstr[k::4]) / max(1, len(lowstr[k::4])))
+    bpos = [(i - phase) % 4 for i in range(len(bf))]
+    # gate: niente beat nei silenzi / sfumati
+    rms = _movavg([(e / hop) ** 0.5 for e in E[:n]], int(fps * 0.2))
+    med = sorted(r for r in rms if r > 0)
+    gate = 0.12 * (med[len(med) // 2] if med else 0.0)
+    keep = [i for i, f in enumerate(bf) if rms[f] >= gate]
+    # intensita' per beat: energia smussata ~1s, normalizzata tra 10 e 90 percentile
+    sm = _movavg(rms, int(fps * 0.5))
+    ev = [sm[bf[i]] for i in keep]
+    if ev:
+        srt = sorted(ev)
+        lo_, hi_ = srt[int(0.1 * len(srt))], srt[min(len(srt) - 1, int(0.9 * len(srt)))]
+        rng = (hi_ - lo_) or 1.0
+        intens = [max(0.0, min(1.0, (e - lo_) / rng)) for e in ev]
     else:
         intens = []
-    return bpm, times, intens
+    times = [round(bf[i] / fps, 3) for i in keep]
+    return 60.0 * fps / P, times, [bpos[i] for i in keep], intens
 
 
 # --------------------------------------------------------------------------
@@ -242,33 +328,67 @@ def build_shots(videos, thresh, split, set_log):
 # Montaggio (tape continuo di shot, tagliato sui beat)
 # --------------------------------------------------------------------------
 STYLES = {
-    "Veloce (ogni beat)": [1],
-    "Medio (ogni 2 beat)": [2],
-    "Lento (ogni 4 beat)": [4],
-    "Dinamico (segue l'energia)": None,   # densità dei tagli guidata dall'intensità
+    "Veloce (ogni beat)": "beat",
+    "Medio (ogni 2 beat)": "half",
+    "Lento (ogni battuta)": "bar",
+    "Dinamico (segue l'energia)": "dyn",   # densita' per battuta guidata dall'energia
 }
+MIN_CUT = 0.33   # s: nessuno stacco piu' corto di cosi' (mai tagli ogni 2 fotogrammi)
 FORMATS = {
     "Orizzontale 16:9": (1920, 1080),
     "Verticale 9:16": (1080, 1920),
 }
 
 
-def _intervals(beats, style, dur, intens):
-    pat = STYLES.get(style)
-    out = []
-    j, pi = 0, 0
-    while j < len(beats) - 1 and beats[j] < dur:
-        if pat:                       # stili fissi: veloce/medio/lento
-            mult = pat[pi % len(pat)]; pi += 1
-        else:                         # DINAMICO: densità dall'energia locale
-            v = intens[j] if j < len(intens) else 0.5
-            mult = 1 if v >= 0.6 else (2 if v >= 0.33 else 4)
-        k = min(j + mult, len(beats) - 1)
-        end = min(beats[k], dur)
-        if end - beats[j] > 0.08:
-            out.append((beats[j], end))
-        j = k
-    return out
+def _cut_points(beats, bpos, style, intens):
+    """Punti di stacco scelti SULLA GRIGLIA MUSICALE: beat, mezze battute o battute."""
+    mode = STYLES.get(style, "beat")
+    barv = [0.5] * len(beats)
+    if mode == "dyn":                 # energia di ogni battuta = media dei suoi beat
+        i = 0
+        while i < len(beats):
+            j = i + 1
+            while j < len(beats) and bpos[j] != 0:
+                j += 1
+            seg = intens[i:j]
+            v = sum(seg) / len(seg) if seg else 0.5
+            for k in range(i, j):
+                barv[k] = v
+            i = j
+    pts = []
+    for i, t in enumerate(beats):
+        p = bpos[i]
+        if mode == "beat":
+            keep = True
+        elif mode == "half":
+            keep = p in (0, 2)
+        elif mode == "bar":
+            keep = p == 0
+        else:                         # dinamico: fitto se spinge, largo se calmo
+            v = barv[i]
+            keep = True if v >= 0.6 else (p in (0, 2) if v >= 0.33 else p == 0)
+        if keep:
+            pts.append(t)
+    return pts
+
+
+def _intervals(beats, bpos, style, dur, intens):
+    """Intervalli (inizio, fine) del montaggio: partono da 0 (come la canzone in
+    timeline), mai piu' corti di MIN_CUT, e finiscono sull'inizio di una battuta."""
+    pts, last = [], 0.0
+    for t in _cut_points(beats, bpos, style, intens):
+        if t - last >= MIN_CUT and t <= dur + 0.01:
+            pts.append(t)
+            last = t
+    if not pts:
+        return []
+    downs = set(t for t, p in zip(beats, bpos) if p == 0)
+    for k in range(len(pts) - 1, max(-1, len(pts) - 9), -1):
+        if pts[k] in downs:           # chiudi sul "1" piu' vicino alla durata scelta
+            pts = pts[:k + 1]
+            break
+    bounds = [0.0] + pts
+    return list(zip(bounds, bounds[1:]))
 
 
 ORDERS = {
@@ -293,7 +413,7 @@ def order_shots(shots, mode):
     return tape                                            # "selezione": come selezionate
 
 
-def montage(shots, song, beats, style, dur, fmt, order_mode, reuse, intens, set_log):
+def montage(shots, song, beats, bpos, style, dur, fmt, order_mode, reuse, intens, set_log):
     proj = resolve.GetProjectManager().GetCurrentProject()
     mp = proj.GetMediaPool()
     if not shots:
@@ -320,41 +440,69 @@ def montage(shots, song, beats, style, dur, fmt, order_mode, reuse, intens, set_
     tl_fps = _tl_fps(new)
     ns = new.GetStartFrame()
 
-    ivs = _intervals(beats, style, dur, intens)
+    ivs = _intervals(beats, bpos, style, dur, intens)
     # Una shot NUOVA a ogni stacco: si passa alla successiva dopo ogni pezzo, cosi'
     # due stacchi di fila non mostrano mai la stessa clip. Se una shot e' piu' corta
     # dello stacco, lo si completa con la shot dopo (resta sul beat). Si ripete solo
     # dopo aver usato TUTTE le shot, e ogni riuso parte da dove si era arrivati nella
     # clip (parti diverse, non la stessa inquadratura). 'reuse' spento = stop alla fine.
+    # Ogni stacco = UNA shot che lo copre tutto (niente code di pochi fotogrammi).
+    # Si parte dalla shot successiva nell'ordine scelto, quindi due stacchi di fila
+    # non mostrano la stessa clip; ogni ritorno a una clip ne mostra un pezzo nuovo.
+    # Quando nessuna shot ha piu' abbastanza materiale nuovo: nuovo giro (riusa)
+    # oppure stop. Solo se nessuna shot e' lunga quanto lo stacco si uniscono pezzi,
+    # comunque mai piu' corti di MIN_PIECE.
+    MIN_PIECE = 0.25
     shot_i = [0]
     read_pos = {}          # id(shot) -> secondi gia' usati di quella shot (in questo giro)
-    total = sum(max(0.0, s["out"] - s["in"]) for s in tape)
-    left = [total]         # materiale non ancora usato in questo giro
     exhausted = [False]
 
+    def remaining(sh):
+        return sh["out"] - sh["in"] - read_pos.get(id(sh), 0.0)
+
+    def take(sh, amount):
+        start = sh["in"] + read_pos.get(id(sh), 0.0)
+        read_pos[id(sh)] = start + amount - sh["in"]
+        return (sh["clip"], sh["fps"], start, start + amount)
+
+    def find_whole(need):
+        for k in range(len(tape)):
+            idx = (shot_i[0] + k) % len(tape)
+            if remaining(tape[idx]) >= need:
+                return idx
+        return None
+
     def pull(length):
-        """Lista di (clip, fps, src_in, src_out) lunga ~length s."""
+        """Lista di (clip, fps, src_in, src_out) lunga length s."""
+        idx = find_whole(length)
+        if idx is None and reuse:
+            read_pos.clear()                    # materiale nuovo finito: nuovo giro
+            idx = find_whole(length)
+        if idx is not None:
+            shot_i[0] = idx + 1
+            return [take(tape[idx], length)]
+        # Nessuna shot e' lunga quanto lo stacco (es. un'intro lunga senza beat):
+        # lo si divide in parti UGUALI, ognuna coperta da una shot intera.
+        longest = max(remaining(s) for s in tape)
+        if longest < MIN_PIECE and reuse:
+            read_pos.clear()
+            longest = max(remaining(s) for s in tape)
+        if longest < MIN_PIECE:
+            exhausted[0] = True
+            return []
+        n = int(math.ceil(length / longest - 1e-9))
+        part = length / n
         pieces = []
-        need = length
-        guard = 0
-        while need > 0.02 and guard < 10000 and total > 0.02:
-            guard += 1
-            if left[0] <= 0.02:                 # usato TUTTO il materiale
-                if not reuse:
-                    exhausted[0] = True
-                    break
-                read_pos.clear()                # riusa: nuovo giro completo
-                left[0] = total
-            sh = tape[shot_i[0] % len(tape)]
-            shot_i[0] += 1
-            start = sh["in"] + read_pos.get(id(sh), 0.0)
-            if sh["out"] - start <= 0.02:       # shot finita in questo giro: la prossima
-                continue
-            take = min(need, sh["out"] - start)
-            pieces.append((sh["clip"], sh["fps"], start, start + take))
-            read_pos[id(sh)] = start + take - sh["in"]
-            left[0] -= take
-            need -= take
+        for _ in range(n):
+            idx = find_whole(part)
+            if idx is None and reuse:
+                read_pos.clear()
+                idx = find_whole(part)
+            if idx is None:                     # stacco monco: si chiude sul beat prima
+                exhausted[0] = True
+                return []
+            shot_i[0] = idx + 1
+            pieces.append(take(tape[idx], part))
         return pieces
 
     ok = 0
@@ -534,7 +682,7 @@ for f in FORMATS:
 for o in ORDERS:
     itm["Ord"].AddItem(o)
 
-VIDEOS, SONG, SHOTS, BEATS, BPM, INTENS = [], None, [], [], 0.0, []
+VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 
 
 def set_status(m):
@@ -561,7 +709,7 @@ def on_refresh(ev=None):
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPM, INTENS
+    global SHOTS, BEATS, BPOS, BPM, INTENS
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -575,11 +723,13 @@ def on_analyze(ev):
     set_status("Analisi in corso (la finestra resta ferma)…")
     SHOTS = build_shots(VIDEOS, sens, split, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
-    BPM, BEATS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
-    set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat.\n\n"
+    BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
+    bars = sum(1 for p in BPOS if p == 0)
+    set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
+            "%d battute (stacco minimo %.2fs).\n\n"
             "Ora scegli stile/durata/formato/ordine e premi 'Monta a tempo'."
             % (len(SHOTS), len(VIDEOS), "divise ai cambi scena" if split else "intere",
-               BPM, len(BEATS)))
+               BPM, len(BEATS), bars, MIN_CUT))
     set_status("Analisi ok: %d shot · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
@@ -591,7 +741,7 @@ def on_make(ev):
     except ValueError:
         dur = 30.0
     set_status("Montaggio in corso…")
-    msg = montage(SHOTS, SONG, BEATS, itm["Style"].CurrentText, dur,
+    msg = montage(SHOTS, SONG, BEATS, BPOS, itm["Style"].CurrentText, dur,
                   itm["Fmt"].CurrentText, ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
                   bool(itm["Reuse"].Checked), INTENS, set_log)
     set_log(msg)

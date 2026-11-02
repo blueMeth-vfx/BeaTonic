@@ -94,10 +94,13 @@ ripete solo dopo aver usato **tutto** il materiale.
 
 | Stile | Taglio |
 |---|---|
-| **Veloce** | stacchi fitti, uno quasi per ogni beat |
-| **Medio** | un cambio ogni 2 beat circa |
-| **Lento** | stacchi larghi, un cambio ogni 4 beat |
-| **Dinamico** | segue l'energia: fitto nelle parti intense, largo nelle calme |
+| **Veloce** | uno stacco a ogni beat |
+| **Medio** | uno stacco ogni mezza battuta (sull'1 e sul 3) |
+| **Lento** | uno stacco a ogni battuta (sull'1) |
+| **Dinamico** | battuta per battuta segue l'energia: a ogni beat dove il pezzo spinge, a ogni battuta dove è calmo |
+
+Nessuno stacco è mai più corto di **0,33 s**: anche su un brano frenetico niente
+tagli ogni due fotogrammi.
 
 ---
 
@@ -105,13 +108,24 @@ ripete solo dopo aver usato **tutto** il materiale.
 
 - Resolve non espone scene-cut né beat detection allo scripting: li fa **ffmpeg + DSP
   in Python** dentro al plugin.
-- **Beat**: non una griglia a BPM fisso (driftava sui brani a tempo variabile) ma
-  *onset-driven* — flusso di energia + peak-picking adattivo con **gate sul silenzio**,
-  così dove il brano sfuma non taglia.
+- **Come ascolta la canzone**: non taglia su ogni colpo (charleston e rullate
+  darebbero tagli ogni pochi fotogrammi) ma ricostruisce il **beat** come un musicista:
+  1. trova il **tempo** (BPM) per autocorrelazione dei colpi, preferendo il beat che
+     si sente (90–150 BPM: su una drum&bass a 174 prende il mezzo tempo);
+  2. segue il beat con un **beat tracker a programmazione dinamica** (Ellis 2007, lo
+     stesso metodo di librosa), che regge piccoli cambi di tempo;
+  3. trova le **battute** (il "1") dalla cassa, sulla banda dei bassi;
+  4. **gate sul silenzio**: dove il brano tace o sfuma non mette beat.
+
+  Su brani di prova (128 BPM frenetico, drum&bass 174, accelerazione 110→130) i beat
+  cadono entro 13 ms da quelli veri: meno di un terzo di fotogramma.
+- Il montaggio parte da 0 insieme alla canzone (un'intro senza beat viene coperta da
+  clip intere divise in parti uguali) e chiude sull'inizio di una battuta.
 - **Scene**: i cambi scena più vicini di 1,5 s vengono ignorati (sono quasi sempre
   falsi: movimento veloce, flash, luce che cambia), così lo stesso piano non viene
   spezzato a caso.
-- Il beat detector è "buono", non da software musicale pro: dà il meglio sui brani ritmici.
+- Dà il meglio sui brani ritmici in 4/4; su pezzi senza percussioni (piano, ambient)
+  il beat è più incerto.
 - Il verticale da sorgenti orizzontali ritaglia/adatta secondo le impostazioni di conforma.
 
 ---
