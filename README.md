@@ -88,16 +88,37 @@ condivisa con PlutoniCut.
 
    La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
    della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
-5. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker** in una
+5. **♪ Adatta canzone** *(facoltativo)* → adatta la canzone alla **durata** scelta, come
+   l'AI Music Editor di Resolve (che i plugin non possono usare): resta **la stessa
+   canzone**, con l'**inizio e il finale veri**, solo più corta o più lunga.
+   - Toglie (o ripete, se va allungata) **battute intere** dove la musica "suona
+     uguale": stesso accordo, stesso timbro, stessa posizione nella frase. Prova uno e
+     due salti e sceglie quelli che si sentono meno.
+   - Sul salto: taglio quasi invisibile (60 ms) se i due punti si somigliano, altrimenti
+     una dissolvenza **a tempo** di 1–2 beat, allineata sul "1" della battuta.
+   - Durata esatta con una correzione di tempo di al massimo il 2,5% (non si sente).
+   - Crea `<canzone> - BeaTonic 30s.wav` accanto all'originale, lo importa nel Media
+     Pool e lo usa da subito per Marker e Monta. Nel log: cosa ha tolto o ripetuto e
+     quanto si somigliano i punti di salto.
+   - Per confrontare l'**armonia** serve `numpy` nel Python che usa Resolve (di solito
+     c'è); senza, confronta solo ritmo ed energia ed è meno preciso.
+6. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker** in una
    finestra a parte (Chrome o Edge in modalità app, ridimensionabile e a schermo intero):
    la canzone con la forma d'onda come in una timeline, **un solo tipo di marker — ogni
    marker è un cambio clip** — partendo dai punti di taglio dello stile scelto.
+   **Cambiando stile o durata nell'editor i marker si rifanno subito** (Ctrl+Z per tornare).
+
+   **Anteprima del montato** (riquadro a destra, `P`): mostra le **clip vere** che verranno
+   montate, nell'ordine e nei pezzi che userà Monta, nel formato scelto (16:9 / 9:16).
+   Segue il mouse quando passi sull'onda e il cursore mentre suona, con un lampo a ogni
+   cambio clip. In alternativa **Bianco / nero**: si alterna a ogni cambio clip, per
+   vedere il ritmo dei tagli.
 
    | Mouse | |
    |---|---|
    | trascina sull'onda | scorre la timeline (fluida) |
    | rotella | zoom attorno al mouse (`Shift` + rotella = scorre) |
-   | passa sopra l'onda | **scrub**: senti l'audio in quel punto |
+   | passa sopra l'onda | **ascolto col mouse**: senti l'audio in quel punto |
    | clic / doppio clic | sposta il cursore / nuovo marker |
    | trascina un marker | lo sposti (si aggancia ai beat, `Alt` = libero) |
    | clic destro su un marker | lo togli |
@@ -105,23 +126,27 @@ condivisa con PlutoniCut.
 
    | Tastiera | |
    |---|---|
+   | `Q` o `M` | marker **dove c'è il mouse**, senza cliccare (mentre suona: dove sta suonando) |
    | `Spazio` | play / pausa (la vista segue il cursore) |
-   | `M` | marker sul cursore, anche mentre suona: battilo a tempo |
    | `Canc` | togli il marker selezionato |
    | `←` `→` | sposta il marker selezionato di 1 fotogramma (`Shift`: 10) |
    | `↑` `↓` | marker precedente / successivo |
    | `+` `−` `0` | zoom avanti / indietro / tutta la canzone |
    | `Ctrl+Z` `Ctrl+Shift+Z` | annulla / ripeti |
-   | `S` `N` `F` | scrub · aggancio ai beat · schermo intero |
+   | `S` `N` `P` `F` | ascolto col mouse · aggancio ai beat · anteprima · schermo intero |
 
-   Dall'editor puoi anche rifare i marker dai beat con un altro stile o un'altra durata.
+   - **Aggancia ai beat**: un marker messo o spostato vicino a un beat ci si attacca da
+     solo, così il taglio cade a tempo; spento, va esattamente dove lo metti.
+   - **Ascolto col mouse** (scrub): senti la canzone nel punto sotto il mouse, come
+     quando trascini la testina in Resolve.
+
    **Si salva da solo**: quando hai finito premi **✓ Fatto** e torna su Resolve.
    L'ultimo marker è la **fine** del montaggio.
 
    ![Editor dei marker di BeaTonic](docs/editor_marker.jpg)
-6. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
-   e l'altro**, esattamente sui fotogrammi dei marker. Se hai saltato il punto 5,
-   taglia direttamente sui beat dello stile scelto. Nel log trovi il **riepilogo**:
+7. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
+   e l'altro**, esattamente sui fotogrammi dei marker (le stesse clip dell'anteprima).
+   Se hai saltato l'editor, taglia direttamente sui beat dello stile scelto. Nel log trovi il **riepilogo**:
    quanto materiale c'è e se è stato necessario ripetere qualche pezzo (e perché).
 
 > Puoi riaprire l'editor, ritoccare i marker e premere **Monta** quante volte vuoi:

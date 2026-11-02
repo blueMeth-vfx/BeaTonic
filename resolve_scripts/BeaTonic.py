@@ -186,6 +186,16 @@ def _decode_mono(path, sr=11025, af=None, name="_song.wav"):
     return _read_wav(out)
 
 
+def _wav_dur(p):
+    try:
+        w = wave.open(p, "rb")
+        d = w.getnframes() / float(w.getframerate())
+        w.close()
+        return d
+    except Exception:
+        return 0.0
+
+
 def _read_wav(p):
     w = wave.open(p, "rb")
     raw, sr = w.readframes(w.getnframes()), w.getframerate()
@@ -493,14 +503,20 @@ def _cut_points(beats, bpos, style, intens):
     return pts
 
 
-def _intervals(beats, bpos, style, dur, intens):
+def _intervals(beats, bpos, style, dur, intens, song_len=0.0):
     """Intervalli (inizio, fine) del montaggio: partono da 0 (come la canzone in
-    timeline), mai piu' corti di MIN_CUT, e finiscono sull'inizio di una battuta."""
+    timeline), mai piu' corti di MIN_CUT, e finiscono sull'inizio di una battuta.
+    Se il montaggio copre TUTTA la canzone (es. adattata alla durata) finisce con lei."""
     pts, last = [], 0.0
     for t in _cut_points(beats, bpos, style, intens):
         if t - last >= MIN_CUT and t <= dur + 0.01:
             pts.append(t)
             last = t
+    if song_len and dur >= song_len - 0.05:
+        if not pts or song_len - pts[-1] >= MIN_CUT:
+            pts.append(song_len)
+        bounds = [0.0] + pts
+        return list(zip(bounds, bounds[1:]))
     if not pts:
         return []
     downs = set(t for t, p in zip(beats, bpos) if p == 0)
@@ -520,13 +536,14 @@ ORDERS = {
 }
 
 
-def order_shots(shots, mode):
+def order_shots(shots, mode, seed=None):
     """Ordine delle shot nel montaggio. Per nome: le shot dello stesso video restano
-    insieme e in ordine di tempo. Casuale: mischia le shot di TUTTI i video."""
+    insieme e in ordine di tempo. Casuale: mischia le shot di TUTTI i video (con lo
+    stesso 'seed' esce lo stesso ordine: l'anteprima dell'editor = il montaggio)."""
     tape = list(shots)
     if mode == "casuale":
         import random
-        random.shuffle(tape)
+        random.Random(seed).shuffle(tape)
     elif mode in ("nameaz", "nameza"):
         tape.sort(key=lambda s: s["in"])                   # sort stabili: prima il tempo,
         tape.sort(key=lambda s: (s["clip"].GetName() or "").lower(),
@@ -586,6 +603,26 @@ def run(root, port, standalone=False):
         with open(os.path.join(root, "session.json"), "r", encoding="utf-8") as f:
             return json.load(f)
 
+    locks = {}
+
+    def sprite(i):
+        """Miniature di una clip in UN'immagine a mosaico (per l'anteprima del montato),
+        create con ffmpeg la prima volta che servono."""
+        s = sess()
+        c = s["clips"][i]
+        out = os.path.join(root, "thumb_%s_%d.jpg" % (s["session"], i))
+        with locks.setdefault(i, threading.Lock()):
+            if not os.path.exists(out):
+                import subprocess
+                vf = ("fps=%g,scale='if(gt(iw,ih),200,-2)':'if(gt(iw,ih),-2,200)',tile=%dx%d"
+                      % (c["f"], c["cols"], c["rows"]))
+                subprocess.run([s["ffmpeg"], "-y", "-v", "error", "-i", c["path"], "-an", "-vf", vf,
+                                "-frames:v", "1", "-q:v", "5", out + ".tmp.jpg"],
+                               capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0)
+                if os.path.exists(out + ".tmp.jpg"):
+                    os.replace(out + ".tmp.jpg", out)
+        return out
+
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -623,6 +660,8 @@ def run(root, port, standalone=False):
                     self._file(s, MIME.get(os.path.splitext(s)[1].lower(), "application/octet-stream"))
                 elif p == "/logo":
                     self._file(sess().get("logo") or "", "image/png")
+                elif p.startswith("/thumb/"):
+                    self._file(sprite(int(p.split("/")[2])), "image/jpeg")
                 elif p == "/ping":
                     self._bytes(b"ok")
                 else:
@@ -699,8 +738,17 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 input[type=number] { width: 62px; }
 .sep { width: 1px; height: 24px; background: var(--line); margin: 0 3px; opacity: .6; }
 #ov { display: block; width: 100%; height: 58px; cursor: pointer; border-bottom: 1px solid var(--line); }
-#mainwrap { flex: 1; position: relative; min-height: 120px; }
+#mainwrap { flex: 1; display: flex; min-height: 120px; }
+#cv { flex: 1; position: relative; min-width: 0; }
 #main { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+#prev { width: clamp(220px, 27vw, 440px); display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: var(--panel); border-left: 1px solid var(--line); }
+#prev[hidden] { display: none; }
+#prevHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#prevHead b { color: var(--accent2); }
+#prevBox { flex: 1; position: relative; min-height: 0; }
+#pv { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+#prevInfo { color: var(--muted); min-height: 2.6em; line-height: 1.3; font-variant-numeric: tabular-nums; }
 #status { display: flex; gap: 16px; padding: 6px 12px; background: var(--panel);
   border-top: 1px solid var(--line); color: var(--muted); flex-wrap: wrap; align-items: center; }
 #status b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -725,17 +773,18 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
     <span id="song"></span>
     <button id="bPlay" title="Play / pausa (Spazio)">▶ Play</button>
     <div class="sep"></div>
-    <button id="bAdd" title="Marker sul cursore (M), anche mentre suona">+ Marker</button>
+    <button id="bAdd" title="Marker sul cursore arancione. Più veloce: Q o M mettono il marker dove c'è il mouse">+ Marker</button>
     <button id="bDel" title="Togli il marker selezionato (Canc)">− Marker</button>
-    <button id="bSnap" class="on" title="I marker si agganciano ai beat (N). Tieni Alt per sganciarli">Aggancio beat</button>
-    <button id="bScrub" class="on" title="Senti l'audio passando col mouse sulla forma d'onda (S)">Scrub</button>
+    <button id="bSnap" class="on" title="ACCESO: un marker messo o spostato vicino a un beat ci si attacca da solo, così il taglio cade a tempo. Spento: va esattamente dove lo metti. (N; tieni Alt mentre trascini per sganciarlo)">Aggancia ai beat</button>
+    <button id="bScrub" class="on" title="ACCESO: passando il mouse sulla forma d'onda senti l'audio in quel punto, come trascinare la testina in Resolve. (S)">Ascolto col mouse</button>
+    <button id="bPrev" class="on" title="Mostra / nascondi l'anteprima del montato (P)">Anteprima</button>
     <div class="sep"></div>
     <button id="bUndo" title="Annulla (Ctrl+Z)">↶</button>
     <button id="bRedo" title="Ripeti (Ctrl+Shift+Z)">↷</button>
     <div class="sep"></div>
-    <select id="selStyle" title="Stile per rifare i marker dai beat"></select>
-    <input id="inDur" type="number" min="1" step="1" title="Durata del montaggio (secondi)"><span>s</span>
-    <button id="bRegen" title="Rifai i marker dai beat con questo stile e durata">↺ Dai beat</button>
+    <select id="selStyle" title="Stile: cambiandolo i marker si rifanno subito (Ctrl+Z per tornare indietro)"></select>
+    <input id="inDur" type="number" min="1" step="1" title="Durata del montaggio (secondi): cambiandola i marker si rifanno subito"><span>s</span>
+    <button id="bRegen" title="Rifai i marker dai beat con questo stile e durata (cancella le modifiche a mano; Ctrl+Z le riporta)">↺ Rifai</button>
     <button id="bClear" title="Togli tutti i marker">Svuota</button>
     <div class="sep"></div>
     <button id="bFit" title="Tutta la canzone (0)">Tutta</button>
@@ -744,7 +793,16 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
     <button id="bDone" class="primary" title="Salva e torna a DaVinci Resolve">✓ Fatto</button>
   </div>
   <canvas id="ov"></canvas>
-  <div id="mainwrap"><canvas id="main"></canvas></div>
+  <div id="mainwrap">
+    <div id="cv"><canvas id="main"></canvas></div>
+    <aside id="prev">
+      <div id="prevHead"><b>Anteprima del montato</b>
+        <select id="prevMode" title="Clip: le clip vere che verranno montate. Bianco/nero: si alterna a ogni cambio clip">
+          <option value="clip">Clip</option><option value="bn">Bianco / nero</option></select></div>
+      <div id="prevBox"><canvas id="pv"></canvas></div>
+      <div id="prevInfo">—</div>
+    </aside>
+  </div>
   <div id="status">
     <span>Marker <b id="stMarks">0</b></span>
     <span>Stacco più corto <b id="stShort">—</b></span>
@@ -753,7 +811,7 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
     <span>Selezionato <b id="stSel">—</b></span>
     <span>Vista <b id="stZoom">—</b></span>
     <span id="saved"></span>
-    <span id="hint">Trascina = scorri · Rotella = zoom · Mouse sopra l'onda = ascolta · Doppio clic = marker · Trascina un marker = spostalo · Clic destro = toglilo</span>
+    <span id="hint">Q / M = marker dove c'è il mouse · Trascina = scorri · Rotella = zoom · Trascina un marker = spostalo · Clic destro = toglilo</span>
   </div>
 </div>
 
@@ -774,7 +832,8 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
     <tr><td>Striscia in alto</td><td>clic/trascina per andare in un punto della canzone</td></tr>
     <tr><td><b>Tastiera</b></td><td></td></tr>
     <tr><td><kbd>Spazio</kbd></td><td>play / pausa</td></tr>
-    <tr><td><kbd>M</kbd></td><td>marker sul cursore (anche mentre suona: battilo a tempo)</td></tr>
+    <tr><td><kbd>Q</kbd> o <kbd>M</kbd></td><td>marker <b>dove c'è il mouse</b>, senza cliccare (mentre suona: dove sta suonando, battilo a tempo)</td></tr>
+    <tr><td><kbd>P</kbd></td><td>anteprima del montato sì / no</td></tr>
     <tr><td><kbd>Canc</kbd></td><td>togli il marker selezionato</td></tr>
     <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>sposta il marker selezionato di 1 fotogramma (<kbd>Shift</kbd>: 10) o il cursore</td></tr>
     <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>marker precedente / successivo</td></tr>
@@ -796,6 +855,8 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
 "use strict";
 const $ = id => document.getElementById(id);
 const main = $("main"), ov = $("ov"), mg = main.getContext("2d"), og = ov.getContext("2d");
+const pv = $("pv"), pg = pv.getContext("2d");
+let PW = 0, PH = 0, plan = [], sprites = [], prevOn = true, lastPiece = -1, flashUntil = 0;
 let S = null, ctx = null, buf = null, DUR = 0, SR = 44100, mono = null, LV = [], GAIN = 1;
 let marks = [], sel = -1, hoverMark = -1, undo = [], redo = [];
 let t0 = 0, spp = 0.01, head = 0, hoverT = null;
@@ -1038,7 +1099,7 @@ function dedupe() {                          // niente due marker nello stesso f
     marks = out; sel = st === null ? -1 : nearestIn(marks, st);
   }
 }
-function changed() { dirty = true; updStatus(); scheduleSave(); }
+function changed() { buildPlan(); dirty = true; updStatus(); scheduleSave(); }
 function commit(fn) { pushUndo(); fn(); marks.sort((a, b) => a - b); dedupe(); changed(); }
 function snapT(t, px) {                      // aggancio al beat (entro px pixel, o 0.12 s)
   if (!snap || !S.beats.length) return t;
@@ -1046,8 +1107,13 @@ function snapT(t, px) {                      // aggancio al beat (entro px pixel
   const ok = px ? Math.abs(X(bt) - X(t)) <= px : Math.abs(bt - t) <= 0.12;
   return ok ? bt : t;
 }
-function addMark(t, useSnap) {
-  t = Math.min(Math.max(useSnap ? snapT(t, 0) : t, 0.001), DUR);
+function markHere() {                       // Q / M: dove c'e' il mouse (o dove suona)
+  if (play) addMark(curTime(), true);
+  else if (hoverT !== null) addMark(hoverT, true, 8);
+  else addMark(head, true);
+}
+function addMark(t, useSnap, px) {
+  t = Math.min(Math.max(useSnap ? snapT(t, px || 0) : t, 0.001), DUR);
   const fr = 0.5 / (S.fps || 25);
   const j = nearestIn(marks, t);
   if (j >= 0 && Math.abs(marks[j] - t) < fr) { sel = j; dirty = true; updStatus(); return; }
@@ -1098,10 +1164,128 @@ function fromBeats(mode, dur) {
   for (const t of cutPoints(mode)) if (t - last >= S.min_cut && t <= dur + 0.01) { pts.push(t); last = t; }
   const downs = new Set();
   S.beats.forEach((t, i) => { if (S.bpos[i] === 0) downs.add(t); });
+  if (dur >= DUR - 0.05) {                    // il montaggio copre tutta la canzone
+    if (!pts.length || DUR - pts[pts.length - 1] >= S.min_cut) pts.push(DUR);   // (es. adattata)
+    return pts;
+  }
   for (let k = pts.length - 1; k >= Math.max(0, pts.length - 8); k--)
     if (downs.has(pts[k])) return pts.slice(0, k + 1);
   return pts;
 }
+
+// ---------------------------------------------------------------- anteprima del montato
+// Stesse regole di BeaTonic: una shot NUOVA a ogni stacco, ogni ritorno a una clip
+// ne mostra un pezzo nuovo, si ripete solo quando il materiale e' finito.
+function buildPlan() {
+  plan = [];
+  const tape = S.tape || [];
+  if (!tape.length || !marks.length) return;
+  const rp = new Map();
+  let si = 0, giri = 0, prev = 0;
+  const rem = k => tape[k].out - tape[k].in - (rp.get(k) || 0);
+  const take = (k, amt, t) => {
+    const st = tape[k].in + (rp.get(k) || 0);
+    rp.set(k, st + amt - tape[k].in);
+    plan.push({t0: t, t1: t + amt, c: tape[k].c, s0: st, rep: giri > 0});
+  };
+  const whole = need => {
+    for (let j = 0; j < tape.length; j++) { const k = (si + j) % tape.length; if (rem(k) >= need) return k; }
+    return -1;
+  };
+  for (const m of marks) {
+    const len = m - prev, t = prev;
+    prev = m;
+    if (len <= 0.02) continue;
+    let k = whole(len);
+    if (k < 0 && S.reuse) { rp.clear(); giri++; k = whole(len); }
+    if (k >= 0) { si = k + 1; take(k, len, t); continue; }
+    let longest = 0;
+    for (let j = 0; j < tape.length; j++) longest = Math.max(longest, rem(j));
+    const n = longest > 0.02 ? Math.ceil(len / longest - 1e-9) : 0;
+    if (!n || len / n < S.min_cut) break;
+    let ok = true;
+    for (let q = 0; q < n; q++) {
+      const kk = whole(len / n);
+      if (kk < 0) { ok = false; break; }
+      si = kk + 1; take(kk, len / n, t + q * len / n);
+    }
+    if (!ok) break;
+  }
+}
+function pieceAt(t) {
+  let lo = 0, hi = plan.length - 1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (t < plan[m].t0) hi = m - 1; else if (t >= plan[m].t1) lo = m + 1; else return m;
+  }
+  return -1;
+}
+function loadSprite(c) {
+  if (sprites[c]) return sprites[c];
+  const im = new Image(), sp = {img: im, ok: false, err: false};
+  sprites[c] = sp;
+  im.onload = () => { sp.ok = true; dirty = true; };
+  im.onerror = () => { sp.err = true; dirty = true; };
+  im.src = "/thumb/" + c + "?s=" + encodeURIComponent(S.session);
+  return sp;
+}
+function previewTime() { return play ? curTime() : (hoverT !== null ? hoverT : head); }
+function drawPreview() {
+  if (!prevOn || !PW) return;
+  const g = pg;
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = col.bg; g.fillRect(0, 0, PW, PH);
+  const asp = S.aspect || 16 / 9;                 // formato del montaggio (16:9 o 9:16)
+  let w = PW, h = PW / asp;
+  if (h > PH) { h = PH; w = PH * asp; }
+  const x0 = (PW - w) / 2, y0 = (PH - h) / 2, t = previewTime(), i = pieceAt(t);
+  g.fillStyle = "#000"; g.fillRect(x0, y0, w, h);
+  g.textAlign = "center"; g.textBaseline = "middle";
+  if (i < 0) {
+    g.fillStyle = "#777"; g.font = "13px " + font;
+    g.fillText(marks.length ? "fuori dal montaggio" : "nessun marker", x0 + w / 2, y0 + h / 2);
+    $("prevInfo").textContent = marks.length ? "Dopo l'ultimo marker: qui il montaggio è finito." : "Metti dei marker per vedere il montato.";
+    return;
+  }
+  const p = plan[i], cl = S.clips[p.c], src = p.s0 + (t - p.t0);
+  if ($("prevMode").value === "bn") {
+    const white = i % 2 === 1;
+    g.fillStyle = white ? "#fff" : "#000"; g.fillRect(x0, y0, w, h);
+    g.fillStyle = white ? "#000" : "#fff"; g.font = "bold " + Math.round(Math.min(w, h) / 4) + "px " + font;
+    g.fillText(String(i + 1), x0 + w / 2, y0 + h / 2);
+  } else {
+    const sp = loadSprite(p.c);
+    if (sp.ok) {
+      const idx = Math.max(0, Math.min(cl.n - 1, Math.round(src * cl.f)));
+      const tw = sp.img.naturalWidth / cl.cols, th = sp.img.naturalHeight / cl.rows;
+      const sc = Math.min(w / tw, h / th), dw = tw * sc, dh = th * sc;   // come "adatta" di Resolve
+      g.drawImage(sp.img, (idx % cl.cols) * tw, Math.floor(idx / cl.cols) * th, tw, th,
+                  x0 + (w - dw) / 2, y0 + (h - dh) / 2, dw, dh);
+    } else {
+      g.fillStyle = "#999"; g.font = "13px " + font;
+      g.fillText(sp.err ? "anteprima non disponibile" : "preparo le miniature…", x0 + w / 2, y0 + h / 2);
+    }
+  }
+  if (play && i !== lastPiece) flashUntil = performance.now() + 140;   // lampo sul cambio clip
+  lastPiece = i;
+  if (performance.now() < flashUntil) {
+    g.strokeStyle = col.head; g.lineWidth = 5; g.strokeRect(x0 + 2.5, y0 + 2.5, w - 5, h - 5);
+    dirty = true;
+  }
+  $("prevInfo").innerHTML = "Stacco <b>" + (i + 1) + "</b> di " + plan.length + " · " +
+    (cl ? cl.name.replace(/</g, "&lt;") : "") + " da " + fmt(src) + (p.rep ? " · <b>ripetuto</b>" : "");
+}
+function regen(why) {
+  const dur = Math.max(1, parseFloat($("inDur").value) || S.dur);
+  const pts = fromBeats($("selStyle").value, dur);
+  commit(() => { marks = pts.slice(); });
+  sel = -1; updStatus();
+  note = "marker rifatti" + (why ? " (" + why + ")" : "") + " · Ctrl+Z per tornare indietro";
+  noteUntil = performance.now() + 5000;
+  $("saved").textContent = note;
+}
+let note = "", noteUntil = 0;
+function withNote(s) { return performance.now() < noteUntil ? note + " · " + s : s; }
 
 // ---------------------------------------------------------------- vista
 function setHead(t) {
@@ -1126,6 +1310,9 @@ function resize() {
   W = Math.max(50, Math.floor(r.width)); H = Math.max(80, Math.floor(r.height));
   OW = Math.max(50, Math.floor(o.width)); OH = Math.max(20, Math.floor(o.height));
   main.width = W * DPR; main.height = H * DPR; ov.width = OW * DPR; ov.height = OH * DPR;
+  const p = pv.getBoundingClientRect();
+  PW = Math.floor(p.width); PH = Math.floor(p.height);
+  pv.width = Math.max(1, PW * DPR); pv.height = Math.max(1, PH * DPR);
   if (buf) { clampView(); renderOvImg(); updStatus(); }
   dirty = true;
 }
@@ -1154,12 +1341,12 @@ function updStatus() {
 }
 function updClock() { $("stHead").textContent = fmt(curTime()); }
 let saveTimer = null;
-function scheduleSave() { $("saved").textContent = "salvo…"; clearTimeout(saveTimer); saveTimer = setTimeout(save, 250); }
+function scheduleSave() { $("saved").textContent = withNote("salvo…"); clearTimeout(saveTimer); saveTimer = setTimeout(save, 250); }
 async function save() {
   try {
     const r = await fetch("/markers", {method: "POST", headers: {"Content-Type": "application/json"},
                                        body: JSON.stringify({session: S.session, marks: marks})});
-    $("saved").textContent = r.ok ? "✓ salvato" : "⚠ non salvato";
+    $("saved").textContent = withNote(r.ok ? "✓ salvato" : "⚠ non salvato");
   } catch (e) { $("saved").textContent = "⚠ BeaTonic non raggiungibile"; }
 }
 
@@ -1244,7 +1431,8 @@ window.addEventListener("keydown", e => {
   else if (ctrl && (k === "z" || k === "Z")) { e.preventDefault(); if (e.shiftKey) doRedo(); else doUndo(); }
   else if (ctrl && (k === "y" || k === "Y")) { e.preventDefault(); doRedo(); }
   else if (ctrl) return;
-  else if (k === "m" || k === "M") addMark(curTime(), true);
+  else if (k === "m" || k === "M" || k === "q" || k === "Q") markHere();
+  else if (k === "p" || k === "P") togglePrev();
   else if (k === "Delete" || k === "Backspace") { e.preventDefault(); delMark(sel); }
   else if (k === "ArrowLeft" || k === "ArrowRight") {
     e.preventDefault();
@@ -1278,12 +1466,19 @@ on("bSnap", () => { snap = !snap; updButtons(); });
 on("bScrub", () => { scrub = !scrub; updButtons(); });
 on("bUndo", doUndo);
 on("bRedo", doRedo);
-on("bRegen", () => {
-  const dur = Math.max(1, parseFloat($("inDur").value) || S.dur);
-  const pts = fromBeats($("selStyle").value, dur);
-  commit(() => { marks = pts.slice(); });
-  sel = -1; updStatus();
+on("bRegen", () => regen());
+on("bPrev", () => togglePrev());
+function togglePrev() {
+  prevOn = !prevOn;
+  $("prev").hidden = !prevOn;
+  $("bPrev").classList.toggle("on", prevOn);
+  resize();
+}
+$("selStyle").addEventListener("change", e => {          // cambia stile -> marker subito
+  regen("stile " + e.target.options[e.target.selectedIndex].text); e.target.blur(); dirty = true;
 });
+$("inDur").addEventListener("change", e => { regen("durata " + e.target.value + " s"); e.target.blur(); dirty = true; });
+$("prevMode").addEventListener("change", e => { e.target.blur(); dirty = true; });
 on("bClear", () => { commit(() => { marks = []; }); sel = -1; updStatus(); });
 on("bFit", fitAll);
 on("bFull", toggleFull);
@@ -1309,7 +1504,7 @@ function frame(now) {
     dirty = true;
     if (now - lastClock > 90) { updClock(); lastClock = now; }
   }
-  if (dirty && buf) { drawMain(); drawOv(); dirty = false; }
+  if (dirty && buf) { drawMain(); drawOv(); drawPreview(); dirty = false; }
   requestAnimationFrame(frame);
 }
 
@@ -1341,7 +1536,8 @@ async function boot() {
   buildPeaks();
   resize();
   spp = Math.min(12, DUR) / Math.max(W, 1); t0 = 0; clampView();
-  renderOvImg(); updButtons(); updStatus(); updClock();
+  if (!(S.tape && S.tape.length)) { prevOn = false; $("prev").hidden = true; $("bPrev").hidden = true; resize(); }
+  buildPlan(); renderOvImg(); updButtons(); updStatus(); updClock();
   const go = () => { ensureAudio(); $("start").hidden = true; dirty = true; };
   if (ctx.state === "running") go();
   else {
@@ -1461,7 +1657,26 @@ def _open_window(url):
     return webbrowser.open(url)
 
 
-def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme):
+def _preview_data(tape):
+    """Clip e sequenza delle shot (nell'ordine del montaggio) per l'anteprima nell'editor.
+    Per ogni clip: dati del mosaico di miniature (al massimo ~300 per clip)."""
+    clips, index, seq = [], {}, []
+    for sh in tape:
+        c = sh["clip"]
+        key = c.GetClipProperty("File Path") or c.GetName()
+        if key not in index:
+            dur = max(0.1, _clip_dur_sec(c))
+            f = min(4.0, 300.0 / dur)
+            n = int(dur * f) + 1
+            index[key] = len(clips)
+            clips.append({"name": c.GetName(), "path": key, "f": round(f, 4), "n": n,
+                          "cols": 10, "rows": int(math.ceil(n / 10.0))})
+        seq.append({"c": index[key], "in": sh["in"], "out": sh["out"]})
+    return clips, seq
+
+
+def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
+                tape=(), reuse=True, aspect=16 / 9.0):
     """Prepara la sessione e apre l'editor. Ritorna (ok, messaggio)."""
     os.makedirs(WEB, exist_ok=True)
     with open(os.path.join(WEB, "editor.html"), "w", encoding="utf-8") as f:
@@ -1479,6 +1694,8 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme):
             "fps": fps, "theme": theme, "style": style, "dur": dur, "min_cut": MIN_CUT,
             "styles": [[k, v] for k, v in STYLES.items()],
             "logo": _LOGO if os.path.exists(_LOGO) else ""}
+    sess["clips"], sess["tape"] = _preview_data(tape)
+    sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG)
     tmp = os.path.join(WEB, "session.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sess, f)
@@ -1502,7 +1719,7 @@ def editor_marks():
     return sorted(float(t) for t in d.get("marks", []) if float(t) > 0)
 
 
-def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
+def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None):
     """Monta le shot negli intervalli ivs [(inizio s, fine s), ...] che partono da 0.
     Ogni stacco cade ESATTAMENTE sul suo fotogramma: dopo ogni clip si legge dove e'
     finita davvero e la successiva si calcola per arrivare al punto dopo (nessuno
@@ -1513,7 +1730,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
         return "Nessuna shot: analizza prima le clip."
     if not ivs:
         return "Nessun punto di stacco."
-    tape = order_shots(shots, order_mode)
+    tape = order_shots(shots, order_mode, seed)
 
     new = _new_timeline(mp, "BeaTonic_%s" % tag)
     if new is None:
@@ -1638,6 +1855,227 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# Adatta la canzone alla durata (come l'AI Music Editor di Resolve, che i plugin
+# non possono usare): toglie o ripete battute intere dove la musica "suona uguale"
+# (stesso accordo, stesso timbro, stessa posizione nella frase), tenendo l'inizio
+# e il finale veri; dissolvenza brevissima centrata sul "1" della battuta.
+# --------------------------------------------------------------------------
+FIT_XFADE = 0.06          # s: dissolvenza sul punto di salto
+FIT_TEMPO = 0.025         # correzione di tempo massima per la durata esatta (2,5%)
+
+
+def _audio_info(path):
+    """(durata s, fine della musica s: senza il silenzio in coda)."""
+    p = subprocess.run([FFMPEG, "-hide_banner", "-i", path, "-af",
+                        "silencedetect=n=-50dB:d=0.7", "-f", "null", "-"],
+                       capture_output=True, text=True, creationflags=_NOWIN)
+    txt = p.stderr or ""
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", txt)
+    dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+    st = re.findall(r"silence_start: ([\d.]+)", txt)
+    en = re.findall(r"silence_end: ([\d.]+)", txt)
+    end = dur
+    if st and len(st) > len(en):         # silenzio fino alla fine del file
+        end = min(dur, float(st[-1]) + 0.4)
+    return dur, end
+
+
+def _beat_feats(path, beats):
+    """Per ogni beat: (accordo 12 note, timbro 12 bande), vettori normalizzati.
+    Con numpy: FFT vera (cromagramma = l'armonia). Senza: solo energia nel tempo."""
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    sr = 22050
+    p = subprocess.run([FFMPEG, "-v", "error", "-i", path, "-ac", "1", "-ar", str(sr),
+                        "-f", "s16le", "-"], capture_output=True, creationflags=_NOWIN)
+    raw = p.stdout
+    edges = [int(b * sr) for b in beats]
+    if np is not None:
+        y = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+        n_fft, hop = 4096, 1024
+        win = np.hanning(n_fft).astype(np.float32)
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+        ok = np.where((freqs >= 55) & (freqs <= 2000))[0]
+        pc = np.zeros((len(freqs), 12), np.float32)
+        pc[ok, np.round(12 * np.log2(freqs[ok] / 440.0) + 69).astype(int) % 12] = 1.0
+        bands = np.geomspace(60, 8000, 13)
+        bm = np.zeros((len(freqs), 12), np.float32)
+        for k in range(12):
+            bm[(freqs >= bands[k]) & (freqs < bands[k + 1]), k] = 1.0
+        nfr = max(0, 1 + (len(y) - n_fft) // hop)
+        chroma = np.zeros((nfr, 12), np.float32)
+        timbre = np.zeros((nfr, 12), np.float32)
+        for s in range(0, nfr, 512):                    # a blocchi: poca memoria
+            e = min(nfr, s + 512)
+            idx = np.arange(s, e)[:, None] * hop + np.arange(n_fft)[None, :]
+            S = np.abs(np.fft.rfft(y[idx] * win, axis=1))
+            chroma[s:e] = np.log1p(S @ pc)
+            timbre[s:e] = np.log1p(S @ bm)
+        out = []
+        for i in range(len(beats) - 1):
+            a = min(nfr - 1, edges[i] // hop)
+            z = min(nfr, max(a + 1, edges[i + 1] // hop))
+            c, t = chroma[a:z].mean(0), timbre[a:z].mean(0)
+            c = c - c.mean()                            # accordo: quali note spiccano
+            c = c / (np.linalg.norm(c) or 1.0)
+            t = t - t.mean()
+            t = t / (np.linalg.norm(t) or 1.0)
+            out.append((c.tolist(), t.tolist()))
+        return out
+    data = struct.unpack("<%dh" % (len(raw) // 2), raw)   # ripiego senza numpy
+    out = []
+    for i in range(len(beats) - 1):
+        seg = data[edges[i]:edges[i + 1]:4]
+        q = max(1, len(seg) // 12)
+        t = [math.log1p(sum(abs(v) for v in seg[k * q:(k + 1) * q]) / q) for k in range(12)]
+        m = sum(t) / 12.0
+        t = [v - m for v in t]
+        nn = math.sqrt(sum(v * v for v in t)) or 1.0
+        out.append(([], [v / nn for v in t]))
+    return out
+
+
+def _bar_dist(feats, bars):
+    """Distanza tra battute (0 = identiche, 1 = niente in comune), beat per beat:
+    accordo 60% + timbro 40% (solo timbro se manca numpy)."""
+    wc, wt = (0.6, 0.4) if feats and feats[0][0] else (0.0, 1.0)
+    rc, rt = math.sqrt(wc), math.sqrt(wt)
+    V = []
+    for k in range(len(bars)):
+        v = []
+        for c, t in feats[bars[k]:bars[k] + 4]:
+            v += [x * rc for x in c] + [x * rt for x in t]
+        V.append(v)
+    try:
+        import numpy as np
+        A = np.array(V, dtype=np.float64)
+        return np.clip(1.0 - A @ A.T / 4.0, 0.0, 2.0).tolist()
+    except ImportError:
+        n = len(V)
+        D = [[0.0] * n for _ in range(n)]
+        for p in range(n):
+            for q in range(p, n):
+                D[p][q] = D[q][p] = max(0.0, 1.0 - sum(a * b for a, b in zip(V[p], V[q])) / 4.0)
+        return D
+
+
+def fit_plan(beats, bpos, feats, song_end, target):
+    """Sceglie dove saltare. Ritorna {segs: [(da, a)], length, jumps: [(da, a, somiglianza)],
+    exact} oppure None. Prova 1 e 2 salti e tiene quelli che si sentono meno."""
+    bars = [i for i, p in enumerate(bpos) if p == 0 and i + 4 <= len(feats)]
+    nb = len(bars)
+    if nb < 12 or target <= 0:
+        return None
+    T = [beats[i] for i in bars]
+    D = _bar_dist(feats, bars)
+    barlen = (T[-1] - T[0]) / (nb - 1)
+
+    def cost(a, b):                      # suono fino alla battuta a, riprendo dalla battuta b
+        c = [D[a][b]]
+        if a >= 1 and b >= 1:
+            c.append(D[a - 1][b - 1])
+        if a + 1 < nb and b + 1 < nb:
+            c.append(D[a + 1][b + 1])
+        return sum(c) / len(c) + (0.0 if (b - a) % 4 == 0 else 0.08)
+
+    def pack(segs, L, js):
+        return {"segs": segs, "length": L, "exact": abs(L - target) <= FIT_TEMPO * target,
+                "beat": barlen / 4.0,
+                "jumps": [(T[a], T[b], max(0.0, 1.0 - cost(a, b))) for a, b in js]}
+
+    if abs(song_end - target) <= FIT_TEMPO * target:      # gia' della durata giusta
+        return pack([(0.0, song_end)], song_end, [])
+    best = None
+    for tol in (FIT_TEMPO * target, 0.55 * barlen):        # prima esatta, poi la piu' vicina
+        if target < song_end:                              # ---------- ACCORCIARE
+            for a in range(2, nb - 1):                     # 1 salto: inizio + finale
+                for b in range(a + 2, nb):
+                    L = T[a] + song_end - T[b]
+                    err = abs(L - target)
+                    if err <= tol:
+                        sc = cost(a, b) + 0.3 * err / barlen
+                        if best is None or sc < best[0]:
+                            best = (sc, [(a, b)], L)
+            cand = {}                                      # 2 salti: le destinazioni migliori
+            for a in range(2, nb - 1):
+                cs = sorted((cost(a, b), b) for b in range(a + 2, nb))[:8]
+                cand[a] = [(c, b) for c, b in cs if c < 0.5]
+            for a1 in cand:
+                for c1, b1 in cand[a1]:
+                    for a2 in range(b1 + 2, nb - 1):
+                        for c2, b2 in cand.get(a2, ()):
+                            L = T[a1] + (T[a2] - T[b1]) + (song_end - T[b2])
+                            err = abs(L - target)
+                            if err <= tol:
+                                sc = c1 + c2 + 0.04 + 0.3 * err / barlen
+                                if best is None or sc < best[0]:
+                                    best = (sc, [(a1, b1), (a2, b2)], L)
+        else:                                              # ---------- ALLUNGARE (giri)
+            for a in range(4, nb):
+                for b in range(1, a - 3):
+                    loop = T[a] - T[b]
+                    m = max(1, int(round((target - song_end) / loop)))
+                    L = song_end + m * loop
+                    err = abs(L - target)
+                    if err <= tol:
+                        sc = cost(a, b) + 0.03 * m + 0.3 * err / barlen
+                        if best is None or sc < best[0]:
+                            best = (sc, [(a, b)] * m, L)
+        if best:
+            break
+    if not best:
+        return None
+    js = best[1]
+    if target < song_end:
+        segs, pos = [], 0.0
+        for a, b in js:
+            segs.append((pos, T[a]))
+            pos = T[b]
+        segs.append((pos, song_end))
+    else:
+        a, b = js[0]
+        segs = [(0.0, T[a])] + [(T[b], T[a])] * (len(js) - 1) + [(T[b], song_end)]
+    return pack(segs, best[2], js)
+
+
+def _xfade(sim, beat):
+    """Dissolvenza del salto: quasi invisibile se i due punti sono uguali, altrimenti
+    lunga 1-2 beat a tempo (le due parti si fondono in battuta, come un DJ)."""
+    if sim >= 0.85:
+        return FIT_XFADE
+    return beat if sim >= 0.7 else 2 * beat
+
+
+def render_fit(src, plan, target, out):
+    """Crea il file adattato: segmenti di battute intere uniti con una dissolvenza
+    centrata sul "1", poi una correzione di tempo (<= 2,5%) per la durata esatta."""
+    segs, n = plan["segs"], len(plan["segs"])
+    xf = [_xfade(s, plan["beat"]) for _, _, s in plan["jumps"]] or [FIT_XFADE]
+    xf += [xf[-1]] * (n - 1 - len(xf))
+    fc = []
+    for i, (s, e) in enumerate(segs):
+        s2 = max(0.0, s - (xf[i - 1] / 2.0 if i > 0 else 0.0))
+        e2 = e + (xf[i] / 2.0 if i < n - 1 else 0.0)
+        fc.append("[0:a]atrim=start=%.5f:end=%.5f,asetpts=PTS-STARTPTS[s%d]" % (s2, e2, i))
+    last = "s0"
+    for i in range(1, n):
+        fc.append("[%s][s%d]acrossfade=d=%.4f:c1=qsin:c2=qsin[x%d]" % (last, i, xf[i - 1], i))
+        last = "x%d" % i
+    length, ratio = plan["length"], plan["length"] / target
+    if 0.0005 < abs(ratio - 1.0) <= FIT_TEMPO:
+        fc.append("[%s]atempo=%.6f[out]" % (last, ratio))
+        last, length = "out", target
+    p = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", src, "-filter_complex", ";".join(fc),
+                        "-map", "[%s]" % last, "-c:a", "pcm_s24le", out],
+                       capture_output=True, text=True, creationflags=_NOWIN)
+    if p.returncode != 0 or not os.path.exists(out):
+        raise RuntimeError((p.stderr or "ffmpeg")[-300:])
+    return length
+
+
 def _tl_fps(tl):
     try:
         f = float(tl.GetSetting("timelineFrameRate"))
@@ -1757,6 +2195,7 @@ win = disp.AddWindow({
             ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 0}, [
+            ui.Button({"ID": "Fit", "Text": "♪  Adatta canzone", "Weight": 3}),
             ui.Button({"ID": "Mark", "Text": "◆  Marker", "Weight": 3}),
             ui.Button({"ID": "Make", "Text": "▶  Monta", "Weight": 3}),
             ui.Button({"ID": "Close", "Text": "Chiudi", "Weight": 1}),
@@ -1764,8 +2203,8 @@ win = disp.AddWindow({
 
         ui.TextEdit({"ID": "Log", "Weight": 1, "ReadOnly": True,
                      "Text": "1) Seleziona clip + canzone  2) Analizza  "
-                             "3) Marker: vedi la canzone e sistemi i tagli (facoltativo)  "
-                             "4) Monta."}),
+                             "3) Facoltativi: Adatta canzone (alla durata scelta) e Marker "
+                             "(vedi la canzone, l'anteprima e sistemi i tagli)  4) Monta."}),
         ui.Label({"ID": "Status", "Text": "Pronto.", "Weight": 0, "WordWrap": True}),
     ]),
 ])
@@ -1788,6 +2227,8 @@ for o in ORDERS:
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
+SEED = [0]          # ordine casuale fisso per analisi: anteprima dell'editor = montaggio
+SONG_LEN = [0.0]    # durata della canzone in uso (s)
 
 
 def set_status(m):
@@ -1817,6 +2258,7 @@ def on_analyze(ev):
     global SHOTS, BEATS, BPOS, BPM, INTENS
     MARKS[:] = []                        # nuova analisi: i marker vecchi non valgono piu'
     SESSION[0] = "%x" % int(time.time() * 1000)
+    SEED[0] = int(time.time() * 1000) & 0x7fffffff
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -1830,6 +2272,7 @@ def on_analyze(ev):
     SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
+    SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav"))
     bars = sum(1 for p in BPOS if p == 0)
     set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
@@ -1861,7 +2304,13 @@ def _proj_fps():
 
 
 def marks_from_beats():
-    return [b for _, b in _intervals(BEATS, BPOS, itm["Style"].CurrentText, _dur(), INTENS)]
+    return [b for _, b in _intervals(BEATS, BPOS, itm["Style"].CurrentText, _dur(), INTENS,
+                                     SONG_LEN[0])]
+
+
+def _tape():
+    """Le shot nell'ordine in cui verranno montate (stesso seme del montaggio)."""
+    return order_shots(SHOTS, ORDERS.get(itm["Ord"].CurrentText, "nameaz"), SEED[0])
 
 
 def on_mark(ev):
@@ -1874,8 +2323,10 @@ def on_mark(ev):
     elif not MARKS:
         MARKS[:] = marks_from_beats()
     set_status("Apro l'editor dei marker…")
+    W, H = FORMATS.get(itm["Fmt"].CurrentText, (1920, 1080))
     ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
-                           itm["Style"].CurrentText, _dur(), THEME)
+                           itm["Style"].CurrentText, _dur(), THEME, tape=_tape(),
+                           reuse=bool(itm["Reuse"].Checked), aspect=W / float(H))
     if not ok:
         set_log(info); set_status(info); return
     set_log("EDITOR DEI MARKER aperto in una finestra a parte (%d marker).\n\n"
@@ -1886,6 +2337,72 @@ def on_mark(ev):
             "l'altro, l'ultimo marker è la fine.\n\n"
             "(Se la finestra non si è aperta: %s)" % (len(MARKS), info))
     set_status("Editor aperto: sistema i marker, poi 'Monta'.")
+
+
+def on_fit(ev):
+    """Adatta la canzone alla durata scelta (inizio e finale veri, salti dove non si
+    sentono), la importa nel Media Pool e la usa da qui in poi."""
+    global SONG, BPM, BEATS, BPOS, INTENS
+    if not BEATS or not SONG:
+        set_log("Prima premi 'Analizza'."); return
+    target = _dur()
+    src = SONG.GetClipProperty("File Path") or ""
+    old = SONG.GetName()
+    set_status("Adatto la canzone a %.1f s…" % target)
+    set_log("Adatto «%s» a %.1f s: confronto armonia, timbro e battute…" % (old, target))
+    dur, end = _audio_info(src)
+    feats = _beat_feats(src, BEATS)
+    plan = fit_plan(BEATS, BPOS, feats, end, target)
+    if not plan:
+        set_log("Non riesco ad adattare questa canzone (troppe poche battute riconosciute)."); return
+    name = "%s - BeaTonic %ss.wav" % (os.path.splitext(os.path.basename(src))[0], "%g" % round(target, 2))
+    out = os.path.join(os.path.dirname(src), name)
+    try:
+        length = render_fit(src, plan, target, out)
+    except Exception:                    # cartella della canzone non scrivibile
+        out = os.path.join(_TMP, name)
+        try:
+            length = render_fit(src, plan, target, out)
+        except Exception as e:
+            set_log("Errore nel creare la canzone adattata:\n%s" % e); return
+    items = None
+    try:
+        items = resolve.GetProjectManager().GetCurrentProject().GetMediaPool().ImportMedia([out])
+    except Exception:
+        items = None
+    if not items:
+        set_log("Canzone adattata creata ma non importata nel Media Pool:\n%s" % out); return
+    SONG = items[0]
+    BPM, BEATS, BPOS, INTENS = beat_grid(out)
+    SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav")) or length
+    MARKS[:] = []
+    SESSION[0] = "%x" % int(time.time() * 1000)
+    mm = lambda t: "%d:%04.1f" % (int(t // 60), t % 60)
+    how = lambda s: ("taglio invisibile" if s >= 0.85 else
+                     "dissolvenza a tempo di 1 beat" if s >= 0.7 else "dissolvenza a tempo di 2 beat")
+    js = plan["jumps"]
+    lines = ["CANZONE ADATTATA: «%s», %.2f s (era %s), importata nel Media Pool e usata "
+             "da ora per Marker e Monta." % (name, length, mm(dur))]
+    if not js:
+        lines.append("• Era già della durata giusta: nessun taglio.")
+    elif target < end:
+        lines.append("• Tiene l'inizio e il finale veri; toglie %s." % ", ".join(
+            "%s–%s" % (mm(a), mm(b)) for a, b, _ in js))
+    else:
+        a, b, _ = js[0]
+        lines.append("• Ripete la parte %s–%s %d volt%s, poi il finale vero." % (
+            mm(b), mm(a), len(js), "a" if len(js) == 1 else "e"))
+    for a, b, s in js[:1] if target >= end else js:
+        lines.append("• Salto %s → %s: somiglianza %.0f%% (%s)." % (mm(a), mm(b), 100 * s, how(s)))
+    if not plan["exact"]:
+        lines.append("• Durata più vicina possibile tenendo inizio e finale: %.2f s." % length)
+    if not feats or not feats[0][0]:
+        lines.append("• Confronto senza armonia (manca numpy in Python): meno preciso. "
+                     "Installa numpy per salti migliori.")
+    lines.append("\nRiascoltala: se rifai 'Analizza', seleziona nel Media Pool la canzone "
+                 "adattata (non l'originale «%s»)." % old)
+    set_log("\n".join(lines))
+    set_status("Canzone adattata a %.2f s." % length)
 
 
 def on_make(ev):
@@ -1902,12 +2419,12 @@ def on_make(ev):
     else:
         if not BEATS:
             set_log("Prima premi 'Analizza'."); return
-        ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS)
+        ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS, SONG_LEN[0])
         tag, src = style.split()[0], "dai beat (stile %s)" % style.split()[0]
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, ivs, tag, itm["Fmt"].CurrentText,
                   ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
-                  bool(itm["Reuse"].Checked), set_log)
+                  bool(itm["Reuse"].Checked), set_log, SEED[0])
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg.split("\n")[0][:90])
 
@@ -1919,6 +2436,7 @@ def on_close(ev):
 
 win.On.Refresh.Clicked = on_refresh
 win.On.Analyze.Clicked = on_analyze
+win.On.Fit.Clicked = on_fit
 win.On.Mark.Clicked = on_mark
 win.On.Make.Clicked = on_make
 win.On.Close.Clicked = on_close
