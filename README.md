@@ -88,32 +88,47 @@ condivisa con PlutoniCut.
 
    La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
    della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
-5. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker**, una
-   finestra del plugin (niente lavoro sulla timeline di Resolve):
-   - in alto **tutta la canzone** con la forma d'onda, sotto il **dettaglio** attorno al
-     cursore (zoom 4 / 8 / 16 / 32 s) con la griglia dei beat;
-   - **un solo tipo di marker: ogni marker è un cambio clip**; si parte dai punti di
-     taglio dello stile scelto;
-   - **▶ Ascolta** e premi **+ Marker** a tempo, anche con la barra spaziatrice: il
-     marker si aggancia al beat più vicino (spunta *aggancia al beat*);
-   - **◀ Marker / Marker ▶** saltano tra i marker; **– Marker** e **◀ 1 fot. / 1 fot. ▶**
-     agiscono sul marker evidenziato (il più vicino al cursore);
-   - clic sulla forma d'onda = sposta il cursore, doppio clic = nuovo marker;
-   - **↶ Annulla**, **↺ Rifai dai beat**, **Svuota**, poi **✓ Fatto**.
+5. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker** in una
+   finestra a parte (Chrome o Edge in modalità app, ridimensionabile e a schermo intero):
+   la canzone con la forma d'onda come in una timeline, **un solo tipo di marker — ogni
+   marker è un cambio clip** — partendo dai punti di taglio dello stile scelto.
 
-   ![Editor dei marker: forma d'onda, marker e cursore nei due temi](docs/editor_marker.png)
+   | Mouse | |
+   |---|---|
+   | trascina sull'onda | scorre la timeline (fluida) |
+   | rotella | zoom attorno al mouse (`Shift` + rotella = scorre) |
+   | passa sopra l'onda | **scrub**: senti l'audio in quel punto |
+   | clic / doppio clic | sposta il cursore / nuovo marker |
+   | trascina un marker | lo sposti (si aggancia ai beat, `Alt` = libero) |
+   | clic destro su un marker | lo togli |
+   | striscia in alto | tutta la canzone: clic o trascina per andarci |
 
+   | Tastiera | |
+   |---|---|
+   | `Spazio` | play / pausa (la vista segue il cursore) |
+   | `M` | marker sul cursore, anche mentre suona: battilo a tempo |
+   | `Canc` | togli il marker selezionato |
+   | `←` `→` | sposta il marker selezionato di 1 fotogramma (`Shift`: 10) |
+   | `↑` `↓` | marker precedente / successivo |
+   | `+` `−` `0` | zoom avanti / indietro / tutta la canzone |
+   | `Ctrl+Z` `Ctrl+Shift+Z` | annulla / ripeti |
+   | `S` `N` `F` | scrub · aggancio ai beat · schermo intero |
+
+   Dall'editor puoi anche rifare i marker dai beat con un altro stile o un'altra durata.
+   **Si salva da solo**: quando hai finito premi **✓ Fatto** e torna su Resolve.
    L'ultimo marker è la **fine** del montaggio.
+
+   ![Editor dei marker di BeaTonic](docs/editor_marker.jpg)
 6. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
    e l'altro**, esattamente sui fotogrammi dei marker. Se hai saltato il punto 5,
-   taglia direttamente sui beat dello stile scelto.
+   taglia direttamente sui beat dello stile scelto. Nel log trovi il **riepilogo**:
+   quanto materiale c'è e se è stato necessario ripetere qualche pezzo (e perché).
 
 > Puoi riaprire l'editor, ritoccare i marker e premere **Monta** quante volte vuoi:
 > ogni volta nasce una timeline nuova. Una nuova **Analizza** riparte da zero.
 >
-> L'ascolto nell'editor usa il suono di Windows (o `afplay` su Mac). Il clic diretto
-> sulla forma d'onda dipende dalla versione di Resolve: se non risponde, il cursore
-> si sposta con la barra sotto le immagini.
+> L'editor gira solo sul tuo computer (un piccolo server locale su `127.0.0.1`, che si
+> spegne quando chiudi BeaTonic): nessuna connessione esterna.
 
 **Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
 ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si

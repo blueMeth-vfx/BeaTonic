@@ -14,20 +14,19 @@ Montaggio ritmato a tempo di musica:
 Richiede ffmpeg (rilevato in automatico). Self-contained, zero dipendenze Python.
 """
 
+import json
 import math
 import os
 import re
+import shutil
+import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 import wave
-import zlib
-
-try:
-    import winsound              # ascolto nell'editor dei marker (Windows)
-except ImportError:
-    winsound = None
 
 _LOGO = os.path.join(os.environ.get("APPDATA", ""), "Blackmagic Design",
                      "DaVinci Resolve", "Support", "Fusion", "Scripts", "Utility",
@@ -555,162 +554,952 @@ def _put_song(mp, song, ns, frames=None):
 
 
 # --------------------------------------------------------------------------
-# Editor dei marker: forma d'onda disegnata come immagine + ascolto
+# Editor dei marker: una finestra a parte (Chrome/Edge in modalita' "app", oppure
+# il browser predefinito) servita da un piccolo server SOLO su questo computer.
+# Disegno fluido, trascinamento, zoom, scrub audio al passaggio del mouse, marker
+# trascinabili. I marker si salvano da soli in markers.json; "Monta" li legge.
 # --------------------------------------------------------------------------
-PEAKS, PEAK_HZ = [], 200.0   # ampiezza massima ~200 volte al secondo (0..1)
+WEB = os.path.join(_TMP, "editor")
+EDITOR = {"proc": None, "port": None}
+SESSION = [""]            # cambia a ogni Analizza: i marker vecchi non valgono piu'
+BROWSER_AUDIO = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
+
+SERVER_PY = r'''
+import json, os, shutil, sys, threading, time
+try:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+except ImportError:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+MIME = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
+        ".ogg": "audio/ogg", ".flac": "audio/flac", ".png": "image/png"}
 
 
-def wave_peaks(wav):
-    """Ampiezze per disegnare la forma d'onda, dal wav mono gia' decodificato."""
-    try:
-        sig, sr = _read_wav(wav)
-    except Exception:
-        return [], 200.0
-    st = max(1, int(sr / 200))
-    pk = [max(max(sig[i:i + st]), -min(sig[i:i + st]))
-          for i in range(0, len(sig) - st + 1, st)]
-    srt = sorted(pk)
-    top = (srt[int(0.99 * (len(srt) - 1))] if srt else 1.0) or 1.0
-    return [min(1.0, v / top) for v in pk], float(sr) / st
+def run(root, port, standalone=False):
+    last = [time.time()]
+
+    def sess():
+        with open(os.path.join(root, "session.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _head(self, code, ctype, n):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(n))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def _bytes(self, data, ctype="text/plain", code=200):
+            self._head(code, ctype, len(data))
+            self.wfile.write(data)
+
+        def _file(self, p, ctype):
+            try:
+                n = os.path.getsize(p)
+            except OSError:
+                return self._bytes(b"not found", code=404)
+            self._head(200, ctype, n)
+            with open(p, "rb") as f:
+                shutil.copyfileobj(f, self.wfile, 1 << 20)
+
+        def do_GET(self):
+            last[0] = time.time()
+            p = self.path.split("?")[0]
+            try:
+                if p in ("/", "/index.html"):
+                    self._file(os.path.join(root, "editor.html"), "text/html; charset=utf-8")
+                elif p == "/session":
+                    self._file(os.path.join(root, "session.json"), "application/json")
+                elif p == "/song":
+                    s = sess()["song_path"]
+                    self._file(s, MIME.get(os.path.splitext(s)[1].lower(), "application/octet-stream"))
+                elif p == "/logo":
+                    self._file(sess().get("logo") or "", "image/png")
+                elif p == "/ping":
+                    self._bytes(b"ok")
+                else:
+                    self._bytes(b"not found", code=404)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+        def do_POST(self):
+            last[0] = time.time()
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n) if n else b""
+            name = {"/markers": "markers.json", "/done": "done.json"}.get(self.path.split("?")[0])
+            if not name:
+                return self._bytes(b"not found", code=404)
+            tmp = os.path.join(root, name + ".tmp")
+            with open(tmp, "wb") as f:
+                f.write(body)
+            os.replace(tmp, os.path.join(root, name))
+            self._bytes(b"ok")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    if standalone:                 # si chiude da solo quando BeaTonic si chiude
+        def watch():
+            while True:
+                time.sleep(15)
+                if (not os.path.exists(os.path.join(root, "alive"))
+                        or time.time() - last[0] > 4 * 3600):
+                    os._exit(0)
+        threading.Thread(target=watch, daemon=True).start()
+    srv.serve_forever()
 
 
-def _png(path, w, h, buf):
-    """PNG RGB scritto a mano (niente librerie): buf = w*h*3 byte."""
-    st = w * 3
-    raw = b"".join(b"\x00" + bytes(buf[y * st:(y + 1) * st]) for y in range(h))
+if __name__ == "__main__":
+    run(sys.argv[1], int(sys.argv[2]), True)
+'''
 
-    def chunk(t, d):
-        return (struct.pack(">I", len(d)) + t + d +
-                struct.pack(">I", zlib.crc32(t + d) & 0xffffffff))
-    with open(path, "wb") as f:
-        f.write(b"\x89PNG\r\n\x1a\n" +
-                chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
-                chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b""))
+EDITOR_HTML = r"""<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>BeaTonic · Marker</title>
+<style>
+:root {
+  --bg: #0f1115; --panel: #111827; --ruler: #0b0d11; --line: #1f2937; --fg: #e5e7eb;
+  --muted: #9ca3af; --accent: #7c3aed; --accent2: #a78bfa; --wave: #7467d6; --beat: #171b27;
+  --bar: #272e44; --mark: #a78bfa; --sel: #ffffff; --head: #f59e0b; --hover: #ffffff;
+  --dim: rgba(0, 0, 0, .45); --btn: #1f2937; --btnh: #374151; --onfg: #ffffff;
+  --font: "Segoe UI", Inter, system-ui, sans-serif;
+}
+body.labs {
+  --bg: #F3F0F7; --panel: #FBF4FF; --ruler: #FBF4FF; --line: #0E0418; --fg: #0E0418;
+  --muted: #4B4458; --accent: #EE3A5B; --accent2: #B0126E; --wave: #A58FC4; --beat: #ECE3F5;
+  --bar: #D8C8EA; --mark: #EE3A5B; --sel: #0E0418; --head: #F7A541; --hover: #0E0418;
+  --dim: rgba(14, 4, 24, .08); --btn: #FBF4FF; --btnh: #EDE3F7; --onfg: #0E0418;
+  --font: "Public Sans", "Segoe UI", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+  font: 13px var(--font); overflow: hidden; user-select: none; -webkit-user-select: none; }
+#app { display: flex; flex-direction: column; height: 100%; }
+#top { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#logo { height: 30px; }
+#title { font-weight: 800; font-size: 16px; color: var(--accent2); }
+#song { color: var(--muted); margin-right: auto; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 26vw; padding-left: 6px; }
+button, select, input { font: inherit; color: var(--fg); background: var(--btn);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; outline: none; }
+body.labs button, body.labs select, body.labs input { border-width: 2px; }
+button { cursor: pointer; white-space: nowrap; }
+button:hover { background: var(--btnh); }
+button.on { background: var(--accent); border-color: var(--accent); color: var(--onfg); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--onfg); font-weight: 700; }
+input[type=number] { width: 62px; }
+.sep { width: 1px; height: 24px; background: var(--line); margin: 0 3px; opacity: .6; }
+#ov { display: block; width: 100%; height: 58px; cursor: pointer; border-bottom: 1px solid var(--line); }
+#mainwrap { flex: 1; position: relative; min-height: 120px; }
+#main { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+#status { display: flex; gap: 16px; padding: 6px 12px; background: var(--panel);
+  border-top: 1px solid var(--line); color: var(--muted); flex-wrap: wrap; align-items: center; }
+#status b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+#hint { margin-left: auto; opacity: .85; }
+.overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .55); z-index: 10; }
+.overlay[hidden] { display: none; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px 26px; max-width: 680px; line-height: 1.55; }
+.card h2 { margin: 0 0 10px; color: var(--accent2); }
+.card .row { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px;
+  font: 12px ui-monospace, Consolas, monospace; background: var(--ruler); }
+td { padding: 3px 14px 3px 0; vertical-align: top; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="top">
+    <img id="logo" alt="" hidden>
+    <span id="title">BeaTonic · Marker</span>
+    <span id="song"></span>
+    <button id="bPlay" title="Play / pausa (Spazio)">▶ Play</button>
+    <div class="sep"></div>
+    <button id="bAdd" title="Marker sul cursore (M), anche mentre suona">+ Marker</button>
+    <button id="bDel" title="Togli il marker selezionato (Canc)">− Marker</button>
+    <button id="bSnap" class="on" title="I marker si agganciano ai beat (N). Tieni Alt per sganciarli">Aggancio beat</button>
+    <button id="bScrub" class="on" title="Senti l'audio passando col mouse sulla forma d'onda (S)">Scrub</button>
+    <div class="sep"></div>
+    <button id="bUndo" title="Annulla (Ctrl+Z)">↶</button>
+    <button id="bRedo" title="Ripeti (Ctrl+Shift+Z)">↷</button>
+    <div class="sep"></div>
+    <select id="selStyle" title="Stile per rifare i marker dai beat"></select>
+    <input id="inDur" type="number" min="1" step="1" title="Durata del montaggio (secondi)"><span>s</span>
+    <button id="bRegen" title="Rifai i marker dai beat con questo stile e durata">↺ Dai beat</button>
+    <button id="bClear" title="Togli tutti i marker">Svuota</button>
+    <div class="sep"></div>
+    <button id="bFit" title="Tutta la canzone (0)">Tutta</button>
+    <button id="bFull" title="Schermo intero (F)">⛶</button>
+    <button id="bHelp" title="Comandi (H)">?</button>
+    <button id="bDone" class="primary" title="Salva e torna a DaVinci Resolve">✓ Fatto</button>
+  </div>
+  <canvas id="ov"></canvas>
+  <div id="mainwrap"><canvas id="main"></canvas></div>
+  <div id="status">
+    <span>Marker <b id="stMarks">0</b></span>
+    <span>Stacco più corto <b id="stShort">—</b></span>
+    <span>Fine montaggio <b id="stEnd">—</b></span>
+    <span>Cursore <b id="stHead">0:00:00</b></span>
+    <span>Selezionato <b id="stSel">—</b></span>
+    <span>Vista <b id="stZoom">—</b></span>
+    <span id="saved"></span>
+    <span id="hint">Trascina = scorri · Rotella = zoom · Mouse sopra l'onda = ascolta · Doppio clic = marker · Trascina un marker = spostalo · Clic destro = toglilo</span>
+  </div>
+</div>
 
+<div id="start" class="overlay"><div class="card"><h2>BeaTonic · Marker</h2><div id="startMsg">Preparo l'editor…</div></div></div>
 
-_WPAL = {   # colori della forma d'onda per tema
-    "studio": {"bg": "#0b0d11", "band": "#161a2c", "wave": "#5b5398", "tick": "#1d2130",
-               "mark": "#a78bfa", "near": "#ffffff", "cur": "#f59e0b"},
-    "labs": {"bg": "#FBF4FF", "band": "#EDE3F7", "wave": "#B9A6CF", "tick": "#E8DDF2",
-             "mark": "#EE3A5B", "near": "#0E0418", "cur": "#F7A541"},
+<div id="help" class="overlay" hidden><div class="card">
+  <h2>Comandi</h2>
+  <p>Ogni marker è un <b>cambio clip</b>. L'ultimo marker è la <b>fine</b> del montaggio.</p>
+  <table>
+    <tr><td><b>Mouse</b></td><td></td></tr>
+    <tr><td>Trascina sull'onda</td><td>scorre la timeline</td></tr>
+    <tr><td>Rotella</td><td>zoom attorno al mouse (con <kbd>Shift</kbd>: scorre)</td></tr>
+    <tr><td>Mouse sopra l'onda</td><td>ascolti quel punto (Scrub)</td></tr>
+    <tr><td>Clic</td><td>sposta il cursore</td></tr>
+    <tr><td>Doppio clic</td><td>nuovo marker</td></tr>
+    <tr><td>Trascina un marker</td><td>lo sposti (si aggancia ai beat; <kbd>Alt</kbd> = libero)</td></tr>
+    <tr><td>Clic destro su un marker</td><td>lo togli</td></tr>
+    <tr><td>Striscia in alto</td><td>clic/trascina per andare in un punto della canzone</td></tr>
+    <tr><td><b>Tastiera</b></td><td></td></tr>
+    <tr><td><kbd>Spazio</kbd></td><td>play / pausa</td></tr>
+    <tr><td><kbd>M</kbd></td><td>marker sul cursore (anche mentre suona: battilo a tempo)</td></tr>
+    <tr><td><kbd>Canc</kbd></td><td>togli il marker selezionato</td></tr>
+    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>sposta il marker selezionato di 1 fotogramma (<kbd>Shift</kbd>: 10) o il cursore</td></tr>
+    <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>marker precedente / successivo</td></tr>
+    <tr><td><kbd>+</kbd> <kbd>−</kbd> <kbd>0</kbd></td><td>zoom avanti / indietro / tutta la canzone</td></tr>
+    <tr><td><kbd>Ctrl+Z</kbd> <kbd>Ctrl+Shift+Z</kbd></td><td>annulla / ripeti</td></tr>
+    <tr><td><kbd>S</kbd> <kbd>N</kbd> <kbd>F</kbd></td><td>scrub · aggancio beat · schermo intero</td></tr>
+  </table>
+  <div class="row"><button id="bHelpClose" class="primary">Ok</button></div>
+</div></div>
+
+<div id="doneBox" class="overlay" hidden><div class="card">
+  <h2>Fatto!</h2>
+  <p><b id="doneN">0</b> marker salvati.</p>
+  <p>Torna su <b>DaVinci Resolve</b> e premi <b>▶ Monta</b> in BeaTonic: metterà una clip tra un marker e l'altro.</p>
+  <div class="row"><button id="bKeep">Continua a modificare</button><button id="bClose" class="primary">Chiudi finestra</button></div>
+</div></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const main = $("main"), ov = $("ov"), mg = main.getContext("2d"), og = ov.getContext("2d");
+let S = null, ctx = null, buf = null, DUR = 0, SR = 44100, mono = null, LV = [], GAIN = 1;
+let marks = [], sel = -1, hoverMark = -1, undo = [], redo = [];
+let t0 = 0, spp = 0.01, head = 0, hoverT = null;
+let snap = true, scrub = true, follow = true, play = null, drag = null, ovDrag = null;
+let W = 0, H = 0, OW = 0, OH = 0, DPR = 1, dirty = true, ovImg = null, font = "sans-serif";
+const RULER = 28, col = {};
+
+// ---------------------------------------------------------------- utilita'
+function readColors() {
+  const cs = getComputedStyle(document.body);
+  for (const k of ["bg", "ruler", "line", "fg", "muted", "wave", "beat", "bar", "mark", "sel",
+                   "head", "hover", "dim", "accent"])
+    col[k] = cs.getPropertyValue("--" + k).trim();
+  font = cs.getPropertyValue("--font").trim() || "sans-serif";
+}
+function bsearch(a, t) {                    // primo indice con a[i] >= t
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < t) lo = m + 1; else hi = m; }
+  return lo;
+}
+function nearestIn(a, t) {
+  if (!a.length) return -1;
+  const i = bsearch(a, t);
+  if (i <= 0) return 0;
+  if (i >= a.length) return a.length - 1;
+  return (t - a[i - 1] <= a[i] - t) ? i - 1 : i;
+}
+function fmt(t) {
+  t = Math.max(0, t);
+  const fps = S ? S.fps : 25, m = Math.floor(t / 60), s = Math.floor(t % 60);
+  const f = Math.min(Math.round(fps) - 1, Math.floor((t % 1) * fps + 1e-6));
+  return m + ":" + String(s).padStart(2, "0") + ":" + String(f).padStart(2, "0");
+}
+const X = t => (t - t0) / spp;
+const T = x => t0 + x * spp;
+function clampView() {
+  const maxSpp = Math.max(DUR / Math.max(W, 1), 0.0005);
+  spp = Math.min(Math.max(spp, 0.00005), maxSpp);
+  t0 = Math.min(Math.max(t0, 0), Math.max(0, DUR - W * spp));
+}
+function ensureAudio() { if (ctx && ctx.state === "suspended") ctx.resume(); }
+
+// ---------------------------------------------------------------- forma d'onda
+function buildPeaks() {
+  const n = buf.length, ch = buf.numberOfChannels;
+  mono = new Float32Array(n);
+  for (let c = 0; c < ch; c++) {
+    const d = buf.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += d[i] / ch;
+  }
+  LV = [];
+  const m = Math.ceil(n / 32), mn = new Float32Array(m), mx = new Float32Array(m);
+  for (let b = 0; b < m; b++) {
+    let lo = 1, hi = -1;
+    const e = Math.min(n, (b + 1) * 32);
+    for (let i = b * 32; i < e; i++) { const v = mono[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    mn[b] = lo; mx[b] = hi;
+  }
+  LV.push({block: 32, min: mn, max: mx});
+  while (LV[LV.length - 1].min.length > 1024) {        // livelli piu' grossi (x8)
+    const p = LV[LV.length - 1], k = Math.ceil(p.min.length / 8);
+    const a = new Float32Array(k), z = new Float32Array(k);
+    for (let b = 0; b < k; b++) {
+      let lo = 1, hi = -1;
+      const e = Math.min(p.min.length, (b + 1) * 8);
+      for (let i = b * 8; i < e; i++) { if (p.min[i] < lo) lo = p.min[i]; if (p.max[i] > hi) hi = p.max[i]; }
+      a[b] = lo; z[b] = hi;
+    }
+    LV.push({block: p.block * 8, min: a, max: z});
+  }
+  let peak = 0;
+  const top = LV[LV.length - 1];
+  for (let i = 0; i < top.min.length; i++) peak = Math.max(peak, -top.min[i], top.max[i]);
+  GAIN = peak > 0 ? 0.95 / peak : 1;
+}
+function colRange(s0, s1) {                 // [min, max] dei campioni tra s0 e s1
+  if (s1 - s0 <= 32) {
+    let lo = 1, hi = -1;
+    const a = Math.max(0, Math.floor(s0)), e = Math.min(mono.length, Math.ceil(s1) + 1);
+    for (let i = a; i < e; i++) { const v = mono[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    return lo > hi ? null : [lo, hi];
+  }
+  let L = LV[0];
+  for (const l of LV) if (l.block <= s1 - s0) L = l;
+  const a = Math.max(0, Math.floor(s0 / L.block)), e = Math.min(L.min.length, Math.ceil(s1 / L.block));
+  let lo = 1, hi = -1;
+  for (let i = a; i < e; i++) { if (L.min[i] < lo) lo = L.min[i]; if (L.max[i] > hi) hi = L.max[i]; }
+  return lo > hi ? null : [lo, hi];
 }
 
+// ---------------------------------------------------------------- disegno
+function renderOvImg() {
+  ovImg = document.createElement("canvas");
+  ovImg.width = OW * DPR; ovImg.height = OH * DPR;
+  const g = ovImg.getContext("2d");
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = col.ruler; g.fillRect(0, 0, OW, OH);
+  g.fillStyle = col.wave;
+  const mid = OH / 2, amp = OH / 2 - 3;
+  for (let x = 0; x < OW; x++) {
+    const r = colRange(x / OW * DUR * SR, (x + 1) / OW * DUR * SR);
+    if (!r) continue;
+    const y1 = mid - r[1] * GAIN * amp, y2 = mid - r[0] * GAIN * amp;
+    g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+  }
+}
+function drawOv() {
+  og.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (ovImg) og.drawImage(ovImg, 0, 0, OW, OH);
+  const k = OW / DUR;
+  og.fillStyle = col.mark;
+  for (const m of marks) og.fillRect(Math.round(m * k), 0, 1, Math.round(OH * 0.35));
+  const x0 = t0 * k, w = Math.max(3, W * spp * k);
+  og.globalAlpha = 0.16; og.fillStyle = col.hover; og.fillRect(x0, 0, w, OH); og.globalAlpha = 1;
+  og.strokeStyle = col.accent; og.lineWidth = 1.5; og.strokeRect(x0 + 0.75, 0.75, w - 1.5, OH - 1.5);
+  og.fillStyle = col.head; og.fillRect(Math.round(curTime() * k) - 1, 0, 2, OH);
+}
+function drawMain() {
+  const g = mg;
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = col.bg; g.fillRect(0, 0, W, H);
+  const top = RULER, wh = H - RULER, mid = top + wh / 2, amp = wh / 2 - 10, vs = W * spp;
+  // griglia: beat chiari, battute ("1") piu' marcate
+  const b = S.beats, bp = S.bpos, i0 = bsearch(b, t0), i1 = bsearch(b, t0 + vs);
+  const beatPx = (60 / (S.bpm || 120)) / spp;
+  for (let i = i0; i < i1; i++) {
+    const bar = bp[i] === 0;
+    if (!bar && beatPx < 6) continue;
+    if (bar && beatPx * 4 < 6) continue;
+    g.fillStyle = bar ? col.bar : col.beat;
+    g.fillRect(Math.round(X(b[i])), top, bar ? 2 : 1, wh);
+  }
+  // forma d'onda
+  g.fillStyle = col.wave;
+  if (spp * SR < 2) {                       // zoom estremo: la curva dei campioni
+    g.strokeStyle = col.wave; g.lineWidth = 1.5; g.beginPath();
+    const a = Math.max(0, Math.floor(t0 * SR) - 1), e = Math.min(mono.length, Math.ceil((t0 + vs) * SR) + 2);
+    for (let i = a; i < e; i++) {
+      const x = X(i / SR), y = mid - mono[i] * GAIN * amp;
+      if (i === a) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+  } else {
+    for (let x = 0; x < W; x++) {
+      const r = colRange(T(x) * SR, T(x + 1) * SR);
+      if (!r) continue;
+      const y1 = mid - r[1] * GAIN * amp, y2 = mid - r[0] * GAIN * amp;
+      g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+    }
+  }
+  g.globalAlpha = 0.35; g.fillStyle = col.line; g.fillRect(0, Math.round(mid), W, 1); g.globalAlpha = 1;
+  // dopo l'ultimo marker: fuori dal montaggio
+  if (marks.length) {
+    const xe = Math.max(0, X(marks[marks.length - 1]));
+    if (xe < W) { g.fillStyle = col.dim; g.fillRect(xe, top, W - xe, wh); }
+  }
+  // marker
+  for (let i = 0; i < marks.length; i++) {
+    const x = Math.round(X(marks[i]));
+    if (x < -12 || x > W + 12) continue;
+    const big = i === sel || i === hoverMark;
+    g.fillStyle = i === sel ? col.sel : col.mark;
+    g.fillRect(x - (big ? 1 : 0), top, big ? 3 : 2, wh);
+  }
+  // cursore del mouse
+  if (hoverT !== null && !drag) {
+    g.globalAlpha = 0.35; g.fillStyle = col.hover; g.fillRect(Math.round(X(hoverT)), top, 1, wh); g.globalAlpha = 1;
+  }
+  // righello col timecode
+  g.fillStyle = col.ruler; g.fillRect(0, 0, W, RULER);
+  g.fillStyle = col.line; g.globalAlpha = 0.6; g.fillRect(0, RULER - 1, W, 1); g.globalAlpha = 1;
+  const fps = S.fps || 25;
+  const steps = [1 / fps, 2 / fps, 5 / fps, 10 / fps, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
+  let step = steps[steps.length - 1];
+  for (const s of steps) if (s / spp >= 90) { step = s; break; }
+  g.font = "11px " + font; g.textBaseline = "top";
+  for (let k = Math.ceil(t0 / step); k * step <= t0 + vs; k++) {
+    const x = Math.round(X(k * step));
+    g.fillStyle = col.muted; g.fillRect(x, RULER - 9, 1, 8);
+    g.fillText(fmt(k * step), x + 4, 4);
+  }
+  // maniglie dei marker nel righello (si prendono meglio)
+  for (let i = 0; i < marks.length; i++) {
+    const x = Math.round(X(marks[i]));
+    if (x < -12 || x > W + 12) continue;
+    g.fillStyle = i === sel ? col.sel : col.mark;
+    g.beginPath(); g.moveTo(x - 6, RULER - 13); g.lineTo(x + 7, RULER - 13); g.lineTo(x + 0.5, RULER); g.closePath(); g.fill();
+  }
+  // cursore di riproduzione
+  const hx = Math.round(X(curTime()));
+  g.fillStyle = col.head; g.fillRect(hx - 1, 0, 2, H);
+  g.beginPath(); g.moveTo(hx - 7, 0); g.lineTo(hx + 7, 0); g.lineTo(hx, 9); g.closePath(); g.fill();
+}
 
-def render_wave(path, w, h, t0, t1, marks, cursor, near=None, beats=(), band=None,
-                theme="studio", ticks=False):
-    """Disegna la canzone tra t0 e t1: forma d'onda, griglia dei beat, marker
-    (quello 'near' evidenziato), cursore e, nella vista generale, la zona ingrandita.
-    ticks=True: marker come tacche corte in alto (vista generale, tanti marker)."""
-    pal = dict((k, bytes(int(v[i:i + 2], 16) for i in (1, 3, 5)))
-               for k, v in _WPAL.get(theme, _WPAL["studio"]).items())
-    st = w * 3
-    buf = bytearray(pal["bg"] * (w * h))
+// ---------------------------------------------------------------- audio
+function curTime() { return play ? Math.min(DUR, play.t + (ctx.currentTime - play.c0)) : head; }
+function startPlay(from) {
+  stopPlay();
+  if (!ctx || !buf) return;
+  ensureAudio();
+  from = Math.max(0, Math.min(from, DUR - 0.01));
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination); src.start(0, from);
+  play = {src: src, c0: ctx.currentTime, t: from};
+  src.onended = () => { if (play && play.src === src) { head = curTime(); play = null; updButtons(); dirty = true; } };
+  follow = true; updButtons();
+}
+function stopPlay() {
+  if (play) {
+    const t = curTime();
+    play.src.onended = null;
+    try { play.src.stop(); } catch (e) {}
+    play = null; head = t;
+  }
+  updButtons(); updClock();
+}
+function togglePlay() { if (play) stopPlay(); else startPlay(head); dirty = true; }
+let lastScrub = 0, lastScrubT = -1;
+function scrubAt(t) {                       // un granello di ~90 ms nel punto del mouse
+  if (!scrub || !ctx || !buf || ctx.state !== "running") return;
+  const now = performance.now();
+  if (now - lastScrub < 40 || Math.abs(t - lastScrubT) < 0.004) return;
+  lastScrub = now; lastScrubT = t;
+  const src = ctx.createBufferSource(), gn = ctx.createGain(), c = ctx.currentTime, d = 0.09;
+  src.buffer = buf; src.connect(gn); gn.connect(ctx.destination);
+  gn.gain.setValueAtTime(0, c);
+  gn.gain.linearRampToValueAtTime(0.9, c + 0.006);
+  gn.gain.setValueAtTime(0.9, c + d - 0.02);
+  gn.gain.linearRampToValueAtTime(0, c + d);
+  src.start(c, Math.max(0, Math.min(t, DUR - 0.1)), d);
+}
 
-    def vline(x, col, y0=0, y1=h):
-        if 0 <= x < w and y1 > y0:
-            cnt, base = y1 - y0, y0 * st + x * 3
-            for c in range(3):
-                buf[base + c:base + c + cnt * st:st] = bytes([col[c]]) * cnt
+// ---------------------------------------------------------------- marker
+function pushUndo() { undo.push(marks.slice()); if (undo.length > 300) undo.shift(); redo.length = 0; }
+function dedupe() {                          // niente due marker nello stesso fotogramma
+  const fr = 0.5 / (S.fps || 25), out = [];
+  for (const t of marks) if (!out.length || t - out[out.length - 1] > fr) out.push(t);
+  if (out.length !== marks.length) {
+    const st = sel >= 0 ? marks[sel] : null;
+    marks = out; sel = st === null ? -1 : nearestIn(marks, st);
+  }
+}
+function changed() { dirty = true; updStatus(); scheduleSave(); }
+function commit(fn) { pushUndo(); fn(); marks.sort((a, b) => a - b); dedupe(); changed(); }
+function snapT(t, px) {                      // aggancio al beat (entro px pixel, o 0.12 s)
+  if (!snap || !S.beats.length) return t;
+  const j = nearestIn(S.beats, t), bt = S.beats[j];
+  const ok = px ? Math.abs(X(bt) - X(t)) <= px : Math.abs(bt - t) <= 0.12;
+  return ok ? bt : t;
+}
+function addMark(t, useSnap) {
+  t = Math.min(Math.max(useSnap ? snapT(t, 0) : t, 0.001), DUR);
+  const fr = 0.5 / (S.fps || 25);
+  const j = nearestIn(marks, t);
+  if (j >= 0 && Math.abs(marks[j] - t) < fr) { sel = j; dirty = true; updStatus(); return; }
+  commit(() => marks.push(t));
+  sel = marks.indexOf(t); updStatus();
+}
+function delMark(i) { if (i < 0 || i >= marks.length) return; commit(() => marks.splice(i, 1)); sel = -1; updStatus(); }
+function nudgeSel(d) {
+  if (sel < 0) return;
+  const t = Math.min(Math.max(marks[sel] + d, 0.001), DUR), i = sel;
+  commit(() => { marks[i] = t; });
+  sel = nearestIn(marks, t); head = t; ensureVisible(t); updStatus(); updClock();
+}
+function jumpMark(dir) {
+  const c = curTime();
+  const i = dir < 0 ? bsearch(marks, c - 1e-4) - 1 : bsearch(marks, c + 1e-4);
+  if (i >= 0 && i < marks.length) { sel = i; setHead(marks[i]); updStatus(); }
+}
+function doUndo() { if (!undo.length) return; redo.push(marks.slice()); marks = undo.pop(); sel = -1; changed(); }
+function doRedo() { if (!redo.length) return; undo.push(marks.slice()); marks = redo.pop(); sel = -1; changed(); }
+function cutPoints(mode) {                   // come BeaTonic: punti di stacco sulla griglia
+  const b = S.beats, p = S.bpos, it = S.intens || [], barv = new Array(b.length).fill(0.5);
+  if (mode === "dyn") {
+    let i = 0;
+    while (i < b.length) {
+      let j = i + 1;
+      while (j < b.length && p[j] !== 0) j++;
+      const seg = it.slice(i, j), v = seg.length ? seg.reduce((a, c) => a + c, 0) / seg.length : 0.5;
+      for (let k = i; k < j; k++) barv[k] = v;
+      i = j;
+    }
+  }
+  const out = [];
+  for (let i = 0; i < b.length; i++) {
+    const q = p[i];
+    let keep;
+    if (mode === "beat") keep = true;
+    else if (mode === "half") keep = q === 0 || q === 2;
+    else if (mode === "bar") keep = q === 0;
+    else { const v = barv[i]; keep = v >= 0.6 ? true : (v >= 0.33 ? (q === 0 || q === 2) : q === 0); }
+    if (keep) out.push(b[i]);
+  }
+  return out;
+}
+function fromBeats(mode, dur) {
+  const pts = [];
+  let last = 0;
+  for (const t of cutPoints(mode)) if (t - last >= S.min_cut && t <= dur + 0.01) { pts.push(t); last = t; }
+  const downs = new Set();
+  S.beats.forEach((t, i) => { if (S.bpos[i] === 0) downs.add(t); });
+  for (let k = pts.length - 1; k >= Math.max(0, pts.length - 8); k--)
+    if (downs.has(pts[k])) return pts.slice(0, k + 1);
+  return pts;
+}
 
-    span = (t1 - t0) or 1.0
+// ---------------------------------------------------------------- vista
+function setHead(t) {
+  head = Math.min(Math.max(t, 0), DUR);
+  if (play) startPlay(head);
+  ensureVisible(head); updClock(); dirty = true;
+}
+function ensureVisible(t) {
+  const vs = W * spp;
+  if (t < t0 || t > t0 + vs) { t0 = t - vs * 0.35; clampView(); }
+}
+function zoomBy(f, xc) {
+  if (xc === undefined) { const c = curTime(); xc = (c >= t0 && c <= t0 + W * spp) ? X(c) : W / 2; }
+  const tm = T(xc);
+  spp *= f; clampView(); t0 = tm - xc * spp; clampView();
+  dirty = true; updStatus();
+}
+function fitAll() { spp = DUR / Math.max(W, 1); t0 = 0; clampView(); dirty = true; updStatus(); }
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  const r = main.getBoundingClientRect(), o = ov.getBoundingClientRect();
+  W = Math.max(50, Math.floor(r.width)); H = Math.max(80, Math.floor(r.height));
+  OW = Math.max(50, Math.floor(o.width)); OH = Math.max(20, Math.floor(o.height));
+  main.width = W * DPR; main.height = H * DPR; ov.width = OW * DPR; ov.height = OH * DPR;
+  if (buf) { clampView(); renderOvImg(); updStatus(); }
+  dirty = true;
+}
+function markAt(x) {
+  let best = -1, bd = 7;
+  for (let i = 0; i < marks.length; i++) { const d = Math.abs(X(marks[i]) - x); if (d <= bd) { bd = d; best = i; } }
+  return best;
+}
 
-    def X(t):
-        return int((t - t0) / span * w)
-    if band:
-        for x in range(max(0, X(band[0])), min(w, X(band[1]) + 1)):
-            vline(x, pal["band"])
-    for b in beats:
-        if t0 <= b <= t1:
-            vline(X(b), pal["tick"])
-    n, mid = len(PEAKS), h // 2
-    for x in range(w):
-        a = int((t0 + span * x / w) * PEAK_HZ)
-        seg = PEAKS[max(0, a):min(n, max(a + 1, int((t0 + span * (x + 1) / w) * PEAK_HZ)))]
-        if seg:                              # radice: si vedono anche le parti piano
-            hh = int(math.sqrt(max(seg)) * (mid - 2))
-            vline(x, pal["wave"], mid - hh, mid + hh + 1)
-    for i, m in enumerate(marks):
-        if t0 <= m <= t1:
-            col = pal["near"] if i == near else pal["mark"]
-            if ticks:
-                vline(X(m), col, 0, max(4, h // 4))
-            else:
-                vline(X(m), col)
-                vline(X(m) + 1, col)
-    vline(X(cursor), pal["cur"])
-    _png(path, w, h, buf)
+// ---------------------------------------------------------------- stato e salvataggio
+function updButtons() {
+  $("bPlay").textContent = play ? "❚❚ Pausa" : "▶ Play";
+  $("bSnap").classList.toggle("on", snap);
+  $("bScrub").classList.toggle("on", scrub);
+}
+function updStatus() {
+  const n = marks.length;
+  let short = Infinity, prev = 0;
+  for (const m of marks) { short = Math.min(short, m - prev); prev = m; }
+  $("stMarks").textContent = n;
+  $("stShort").textContent = n ? short.toFixed(2) + " s (" + Math.round(short * S.fps) + " fot.)" : "—";
+  $("stEnd").textContent = n ? fmt(marks[n - 1]) : "—";
+  $("stSel").textContent = sel >= 0 && sel < n ? fmt(marks[sel]) : "—";
+  const vs = W * spp;
+  $("stZoom").textContent = vs < 10 ? vs.toFixed(1) + " s" : Math.round(vs) + " s";
+}
+function updClock() { $("stHead").textContent = fmt(curTime()); }
+let saveTimer = null;
+function scheduleSave() { $("saved").textContent = "salvo…"; clearTimeout(saveTimer); saveTimer = setTimeout(save, 250); }
+async function save() {
+  try {
+    const r = await fetch("/markers", {method: "POST", headers: {"Content-Type": "application/json"},
+                                       body: JSON.stringify({session: S.session, marks: marks})});
+    $("saved").textContent = r.ok ? "✓ salvato" : "⚠ non salvato";
+  } catch (e) { $("saved").textContent = "⚠ BeaTonic non raggiungibile"; }
+}
+
+// ---------------------------------------------------------------- mouse
+main.addEventListener("pointerdown", e => {
+  ensureAudio();
+  const x = e.offsetX, i = markAt(x);
+  if (e.button === 2) { if (i >= 0) delMark(i); return; }
+  if (e.button !== 0) return;
+  main.setPointerCapture(e.pointerId);
+  if (i >= 0) { sel = i; drag = {kind: "mark", i: i, x0: x, moved: false, undo: false}; updStatus(); }
+  else { drag = {kind: "pan", x0: x, t00: t0, moved: false}; main.style.cursor = "grabbing"; }
+  dirty = true;
+});
+main.addEventListener("pointermove", e => {
+  const x = e.offsetX;
+  if (drag) {
+    if (Math.abs(x - drag.x0) > 3) drag.moved = true;
+    if (drag.kind === "pan") {
+      if (drag.moved) { t0 = drag.t00 - (x - drag.x0) * spp; follow = false; clampView(); }
+    } else if (drag.moved) {
+      if (!drag.undo) { pushUndo(); drag.undo = true; }
+      let t = Math.min(Math.max(T(x), 0.001), DUR);
+      if (!e.altKey) t = snapT(t, 8);
+      marks[drag.i] = t;
+      scrubAt(t);
+      updStatus();
+    }
+  } else {
+    hoverT = T(x);
+    hoverMark = markAt(x);
+    main.style.cursor = hoverMark >= 0 ? "ew-resize" : "grab";
+    if (!play) scrubAt(hoverT);
+  }
+  dirty = true;
+});
+main.addEventListener("pointerup", e => {
+  if (drag) {
+    const x = e.offsetX;
+    if (drag.kind === "pan" && !drag.moved) { sel = -1; setHead(T(x)); }
+    if (drag.kind === "mark") {
+      if (drag.moved) {
+        const t = marks[drag.i];
+        marks.sort((a, b) => a - b); sel = marks.indexOf(t); dedupe(); changed();
+      } else setHead(marks[drag.i]);
+    }
+  }
+  drag = null; main.style.cursor = "grab"; updStatus(); dirty = true;
+});
+main.addEventListener("dblclick", e => { addMark(T(e.offsetX), true); });
+main.addEventListener("contextmenu", e => e.preventDefault());
+main.addEventListener("pointerleave", () => { hoverT = null; hoverMark = -1; dirty = true; });
+main.addEventListener("wheel", e => {
+  e.preventDefault();
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    t0 += (e.deltaX || e.deltaY) * spp; follow = false; clampView();
+  } else zoomBy(Math.exp(e.deltaY * 0.0015), e.offsetX);
+  dirty = true;
+}, {passive: false});
+function ovJump(x) { t0 = x / OW * DUR - W * spp / 2; follow = false; clampView(); dirty = true; }
+ov.addEventListener("pointerdown", e => {
+  ensureAudio(); ov.setPointerCapture(e.pointerId);
+  ovDrag = {x0: e.offsetX, moved: false}; ovJump(e.offsetX);
+});
+ov.addEventListener("pointermove", e => {
+  if (!ovDrag) return;
+  if (Math.abs(e.offsetX - ovDrag.x0) > 3) ovDrag.moved = true;
+  ovJump(e.offsetX);
+});
+ov.addEventListener("pointerup", e => {
+  if (ovDrag && !ovDrag.moved) setHead(e.offsetX / OW * DUR);
+  ovDrag = null;
+});
+ov.addEventListener("wheel", e => { e.preventDefault(); zoomBy(Math.exp(e.deltaY * 0.0015)); }, {passive: false});
+
+// ---------------------------------------------------------------- tastiera e pulsanti
+window.addEventListener("keydown", e => {
+  if (!buf || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  ensureAudio();
+  const k = e.key, ctrl = e.ctrlKey || e.metaKey;
+  if (k === " ") { e.preventDefault(); togglePlay(); }
+  else if (ctrl && (k === "z" || k === "Z")) { e.preventDefault(); if (e.shiftKey) doRedo(); else doUndo(); }
+  else if (ctrl && (k === "y" || k === "Y")) { e.preventDefault(); doRedo(); }
+  else if (ctrl) return;
+  else if (k === "m" || k === "M") addMark(curTime(), true);
+  else if (k === "Delete" || k === "Backspace") { e.preventDefault(); delMark(sel); }
+  else if (k === "ArrowLeft" || k === "ArrowRight") {
+    e.preventDefault();
+    const d = (k === "ArrowLeft" ? -1 : 1) * (e.shiftKey ? 10 : 1) / (S.fps || 25);
+    if (sel >= 0) nudgeSel(d); else setHead(curTime() + d);
+  }
+  else if (k === "ArrowUp") { e.preventDefault(); jumpMark(-1); }
+  else if (k === "ArrowDown") { e.preventDefault(); jumpMark(1); }
+  else if (k === "+" || k === "=") zoomBy(1 / 1.6);
+  else if (k === "-" || k === "_") zoomBy(1.6);
+  else if (k === "0") fitAll();
+  else if (k === "s" || k === "S") { scrub = !scrub; updButtons(); }
+  else if (k === "n" || k === "N") { snap = !snap; updButtons(); }
+  else if (k === "f" || k === "F") toggleFull();
+  else if (k === "h" || k === "H" || k === "?") $("help").hidden = !$("help").hidden;
+  else if (k === "Home") setHead(0);
+  else if (k === "End") setHead(marks.length ? marks[marks.length - 1] : DUR);
+  else if (k === "Escape") { sel = -1; $("help").hidden = true; updStatus(); }
+  else return;
+  dirty = true;
+});
+function toggleFull() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+function on(id, fn) { $(id).addEventListener("click", ev => { ensureAudio(); fn(ev); ev.currentTarget.blur(); dirty = true; }); }
+on("bPlay", togglePlay);
+on("bAdd", () => addMark(curTime(), true));
+on("bDel", () => delMark(sel));
+on("bSnap", () => { snap = !snap; updButtons(); });
+on("bScrub", () => { scrub = !scrub; updButtons(); });
+on("bUndo", doUndo);
+on("bRedo", doRedo);
+on("bRegen", () => {
+  const dur = Math.max(1, parseFloat($("inDur").value) || S.dur);
+  const pts = fromBeats($("selStyle").value, dur);
+  commit(() => { marks = pts.slice(); });
+  sel = -1; updStatus();
+});
+on("bClear", () => { commit(() => { marks = []; }); sel = -1; updStatus(); });
+on("bFit", fitAll);
+on("bFull", toggleFull);
+on("bHelp", () => { $("help").hidden = false; });
+on("bHelpClose", () => { $("help").hidden = true; });
+on("bDone", async () => {
+  stopPlay(); clearTimeout(saveTimer); await save();
+  try { await fetch("/done", {method: "POST", body: JSON.stringify({session: S.session, n: marks.length})}); } catch (e) {}
+  $("doneN").textContent = marks.length; $("doneBox").hidden = false;
+});
+on("bKeep", () => { $("doneBox").hidden = true; });
+on("bClose", () => { window.close(); });
+$("help").addEventListener("click", e => { if (e.target.id === "help") $("help").hidden = true; });
+window.addEventListener("resize", resize);
+document.addEventListener("fullscreenchange", () => setTimeout(resize, 50));
+
+// ---------------------------------------------------------------- ciclo di disegno
+let lastClock = 0;
+function frame(now) {
+  if (play) {
+    const c = curTime();
+    if (follow && W * spp < DUR) { t0 = c - W * spp * 0.35; clampView(); }
+    dirty = true;
+    if (now - lastClock > 90) { updClock(); lastClock = now; }
+  }
+  if (dirty && buf) { drawMain(); drawOv(); dirty = false; }
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- avvio
+async function boot() {
+  try { S = await (await fetch("/session", {cache: "no-store"})).json(); }
+  catch (e) { $("startMsg").textContent = "Non trovo la sessione: riapri l'editor da BeaTonic."; return; }
+  document.body.classList.toggle("labs", S.theme === "labs");
+  readColors();
+  $("song").textContent = S.song_name || "";
+  if (S.logo) { $("logo").src = "/logo"; $("logo").hidden = false; }
+  for (const st of S.styles) {
+    const o = document.createElement("option");
+    o.value = st[1]; o.textContent = st[0]; o.selected = st[0] === S.style;
+    $("selStyle").appendChild(o);
+  }
+  $("inDur").value = Math.round(S.dur);
+  marks = (S.marks || []).slice().sort((a, b) => a - b);
+  $("startMsg").textContent = "Carico «" + (S.song_name || "la canzone") + "»…";
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  ctx = new Ctx();
+  let data;
+  try { data = await (await fetch("/song", {cache: "no-store"})).arrayBuffer(); }
+  catch (e) { $("startMsg").textContent = "Non riesco a leggere la canzone."; return; }
+  $("startMsg").textContent = "Leggo l'audio…";
+  try { buf = await ctx.decodeAudioData(data); }
+  catch (e) { $("startMsg").textContent = "Il browser non riesce a leggere questo formato audio."; return; }
+  SR = buf.sampleRate; DUR = buf.duration;
+  buildPeaks();
+  resize();
+  spp = Math.min(12, DUR) / Math.max(W, 1); t0 = 0; clampView();
+  renderOvImg(); updButtons(); updStatus(); updClock();
+  const go = () => { ensureAudio(); $("start").hidden = true; dirty = true; };
+  if (ctx.state === "running") go();
+  else {
+    $("startMsg").innerHTML = "Pronto. <b>Clicca qui per iniziare</b> (serve un clic per attivare l'audio).";
+    $("start").style.cursor = "pointer";
+    $("start").addEventListener("click", go, {once: true});
+  }
+  requestAnimationFrame(frame);
+}
+boot();
+</script>
+</body>
+</html>
+"""
 
 
-PLAY = {"on": False, "t0": 0.0, "wall": 0.0, "end": 0.0, "proc": None, "n": 0, "src": None}
+def _find_python():
+    """Python del sistema per il server dell'editor (non l'eseguibile di Resolve)."""
+    exe = "python.exe" if os.name == "nt" else os.path.join("bin", "python3")
+    for base in (getattr(sys, "base_prefix", ""), sys.prefix, getattr(sys, "exec_prefix", "")):
+        if base and os.path.exists(os.path.join(base, exe)):
+            return os.path.join(base, exe)
+    for name in ("python3", "python", "py"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return None
 
 
-def _ffplay():
-    exe = "ffplay.exe" if os.name == "nt" else "ffplay"
-    p = os.path.join(os.path.dirname(FFMPEG or ""), exe)
-    return p if os.path.exists(p) else None
+def _ping(port):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/ping" % port, timeout=0.4) as r:
+            return r.read() == b"ok"
+    except Exception:
+        return False
 
 
-def stop_play():
-    if winsound:
+def _start_server():
+    """Avvia (o riusa) il server locale dell'editor. Ritorna la porta o None."""
+    if EDITOR["port"] and _ping(EDITOR["port"]):
+        return EDITOR["port"]
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    with open(os.path.join(WEB, "alive"), "w") as f:
+        f.write("1")
+    ok = False
+    py = _find_python()
+    if py:
         try:
-            winsound.PlaySound(None, 0)
+            EDITOR["proc"] = subprocess.Popen(
+                [py, os.path.join(WEB, "bt_server.py"), WEB, str(port)], cwd=WEB,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, creationflags=_NOWIN)
+            for _ in range(50):
+                if _ping(port):
+                    ok = True
+                    break
+                time.sleep(0.1)
+        except Exception:
+            ok = False
+    if not ok:                         # ripiego: server dentro al plugin
+        g = {"__name__": "bt_server"}
+        exec(SERVER_PY, g)
+        threading.Thread(target=g["run"], args=(WEB, port), daemon=True).start()
+        for _ in range(30):
+            if _ping(port):
+                ok = True
+                break
+            time.sleep(0.1)
+    EDITOR["port"] = port if ok else None
+    return EDITOR["port"]
+
+
+def stop_editor():
+    try:
+        os.remove(os.path.join(WEB, "alive"))      # il server si chiude da solo
+    except OSError:
+        pass
+    if EDITOR["proc"]:
+        try:
+            EDITOR["proc"].terminate()
         except Exception:
             pass
-    if PLAY.get("proc"):
-        try:
-            PLAY["proc"].terminate()
-        except Exception:
-            pass
-    PLAY.update(on=False, proc=None)
+    EDITOR.update(proc=None, port=None)
 
 
-def play_from(song_path, t):
-    """Suona la canzone da t (max 2 minuti per volta). Su Windows dentro al plugin
-    (winsound), su Mac con afplay, altrimenti ffplay."""
-    stop_play()
-    src = os.path.join(_TMP, "_play.wav")
-    if PLAY["src"] != song_path or not os.path.exists(src):
-        subprocess.run([FFMPEG, "-y", "-i", song_path, "-ac", "1", "-ar", "22050", src],
+def _open_window(url):
+    """Finestra pulita (senza schede ne' barra) con Chrome o Edge; se mancano,
+    il browser predefinito."""
+    flags = ["--app=" + url, "--new-window", "--no-first-run", "--no-default-browser-check",
+             "--autoplay-policy=no-user-gesture-required", "--window-size=1500,880",
+             "--user-data-dir=" + os.path.join(WEB, "profilo_browser")]
+    cands = []
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
+                     os.environ.get("LOCALAPPDATA")):
+            if base:
+                cands += [os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"),
+                          os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe")]
+    elif sys.platform == "darwin":
+        cands += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+    else:
+        cands += [shutil.which(n) for n in ("google-chrome", "chromium", "microsoft-edge")]
+    for c in cands:
+        if c and os.path.exists(c):
+            try:
+                subprocess.Popen([c] + flags, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=_NOWIN)
+                return True
+            except Exception:
+                pass
+    import webbrowser
+    return webbrowser.open(url)
+
+
+def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme):
+    """Prepara la sessione e apre l'editor. Ritorna (ok, messaggio)."""
+    os.makedirs(WEB, exist_ok=True)
+    with open(os.path.join(WEB, "editor.html"), "w", encoding="utf-8") as f:
+        f.write(EDITOR_HTML)
+    with open(os.path.join(WEB, "bt_server.py"), "w", encoding="utf-8") as f:
+        f.write(SERVER_PY)
+    src = song.GetClipProperty("File Path") or ""
+    path = src
+    if os.path.splitext(src)[1].lower() not in BROWSER_AUDIO:   # es. .aiff/.wma
+        path = os.path.join(WEB, "canzone.wav")
+        subprocess.run([FFMPEG, "-y", "-i", src, "-ar", "44100", path],
                        capture_output=True, creationflags=_NOWIN)
-        PLAY["src"] = song_path
-    try:
-        w = wave.open(src, "rb")
-    except Exception:
-        return False
-    sr, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
-    w.setpos(min(w.getnframes(), int(t * sr)))
-    data = w.readframes(int(120 * sr))
-    w.close()
-    PLAY["n"] += 1
-    out = os.path.join(_TMP, "_play_%d.wav" % (PLAY["n"] % 2))   # due file a turno
-    o = wave.open(out, "wb")
-    o.setnchannels(ch); o.setsampwidth(sw); o.setframerate(sr); o.writeframes(data)
-    o.close()
-    try:
-        if winsound:
-            winsound.PlaySound(out, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        elif sys.platform == "darwin":
-            PLAY["proc"] = subprocess.Popen(["afplay", out])
-        elif _ffplay():
-            PLAY["proc"] = subprocess.Popen([_ffplay(), "-nodisp", "-autoexit",
-                                             "-loglevel", "quiet", out], creationflags=_NOWIN)
-        else:
-            return False
-    except Exception:
-        return False
-    PLAY.update(on=True, t0=t, wall=time.time(), end=t + len(data) / float(sr * ch * sw))
-    return True
+    sess = {"session": SESSION[0], "song_name": song.GetName(), "song_path": path,
+            "beats": beats, "bpos": bpos, "intens": intens, "bpm": bpm, "marks": marks,
+            "fps": fps, "theme": theme, "style": style, "dur": dur, "min_cut": MIN_CUT,
+            "styles": [[k, v] for k, v in STYLES.items()],
+            "logo": _LOGO if os.path.exists(_LOGO) else ""}
+    tmp = os.path.join(WEB, "session.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sess, f)
+    os.replace(tmp, os.path.join(WEB, "session.json"))
+    port = _start_server()
+    if not port:
+        return False, "Non riesco ad avviare l'editor (server locale)."
+    _open_window("http://127.0.0.1:%d/?s=%s" % (port, SESSION[0]))
+    return True, "http://127.0.0.1:%d/" % port
 
 
-def play_time():
-    """Dove si trova l'ascolto adesso (s), o None se non sta suonando."""
-    if not PLAY["on"]:
+def editor_marks():
+    """Marker salvati dall'editor per QUESTA analisi, o None."""
+    try:
+        with open(os.path.join(WEB, "markers.json"), "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
         return None
-    t = PLAY["t0"] + time.time() - PLAY["wall"]
-    if t >= PLAY["end"]:
-        PLAY["on"] = False
-        return PLAY["end"]
-    return t
+    if d.get("session") != SESSION[0]:
+        return None
+    return sorted(float(t) for t in d.get("marks", []) if float(t) > 0)
 
 
 def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
@@ -749,6 +1538,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
     shot_i = [0]
     read_pos = {}          # id(shot) -> secondi gia' usati di quella shot (in questo giro)
     exhausted = [False]
+    giri = [0]             # quante volte il materiale nuovo e' finito e si e' ricominciato
 
     def remaining(sh):
         return sh["out"] - sh["in"] - read_pos.get(id(sh), 0.0)
@@ -770,6 +1560,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
         idx = find_whole(length)
         if idx is None and reuse:
             read_pos.clear()                    # materiale nuovo finito: nuovo giro
+            giri[0] += 1
             idx = find_whole(length)
         if idx is not None:
             shot_i[0] = idx + 1
@@ -792,7 +1583,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
             pieces.append(take(tape[idx], part))
         return pieces
 
-    ok = 0
+    ok, rep = 0, 0
     cur = ns                                    # dove finisce DAVVERO il montaggio
     for _, be in ivs:
         target = ns + int(round(be * tl_fps))   # fotogramma esatto del prossimo stacco
@@ -818,6 +1609,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
                 items = None
             if items:
                 ok += 1
+                rep += 1 if giri[0] else 0      # video gia' mostrato in un giro prima
                 try:
                     cur = items[0].GetStart() + items[0].GetDuration()
                 except Exception:
@@ -826,8 +1618,24 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log):
             break
     frames = cur - ns
     _put_song(mp, song, ns, frames)             # canzone su A1, lunga quanto il montaggio
-    return ("Montaggio '%s' creato: %d stacchi su %.1fs, %s."
-            % (new.GetName(), ok, frames / tl_fps, fmt))
+    # Riepilogo: si capisce subito se il materiale basta o se si e' dovuto ripetere
+    total = sum(s["out"] - s["in"] for s in shots)
+    nclip = len(set(s["clip"].GetName() for s in shots))
+    mm = lambda t: "%d:%02d" % (int(t // 60), int(t % 60))
+    want = ivs[-1][1]
+    lines = ["Montaggio '%s' creato: %d stacchi su %.1fs, %s." % (new.GetName(), ok, frames / tl_fps, fmt),
+             "• Materiale: %d pezzi da %d clip, %s di video in tutto." % (len(shots), nclip, mm(total))]
+    if rep:
+        lines.append("• RIPETIZIONI: %d stacchi su %d riusano video già visto (il materiale è "
+                     "ricominciato da capo %d volt%s): non basta a coprire %s di montaggio senza "
+                     "ripetere. Aggiungi clip o accorcia la durata." % (
+                         rep, ok, giri[0], "a" if giri[0] == 1 else "e", mm(want)))
+    elif exhausted[0] and frames / tl_fps < want - 0.05:
+        lines.append("• Il materiale è finito a %.1fs su %.1fs (riusa clip spento): "
+                     "montaggio più corto, nessuna ripetizione." % (frames / tl_fps, want))
+    else:
+        lines.append("• Nessuna ripetizione: ogni pezzo di video compare una volta sola.")
+    return "\n".join(lines)
 
 
 def _tl_fps(tl):
@@ -892,12 +1700,8 @@ _PAL = {
 _TMPL = """
 * { font-family:%(font)s; font-size:13px; color:%(fg)s; outline:none; }
 QWidget { background-color:%(bg)s; }
-QLabel#Header, QLabel#EdHeader { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
+QLabel#Header { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
 QPushButton#Logo { background:transparent; border:0; margin:0px; }
-QPushButton#Over, QPushButton#Wave { background:transparent; border:0; margin:0px; padding:0px; }
-QLabel#EdInfo, QLabel#EdHint { color:%(muted)s; }
-QSlider::groove:horizontal { height:6px; background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:3px; }
-QSlider::handle:horizontal { background:%(accent)s; width:14px; margin:-6px 0px; border-radius:7px; }
 QPushButton#ThemeBtn { background:transparent; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:4px 9px; color:%(muted)s; font-weight:700; }
 QPushButton#ThemeBtn:hover { border:%(bw)s solid %(accent)s; color:%(fg)s; }
 QLabel#Src { color:%(muted)s; padding:4px 2px; }
@@ -907,8 +1711,8 @@ QComboBox::drop-down { border:0; width:18px; }
 QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; margin:0px 3px; }
 QPushButton:hover { background:%(border)s; }
 QPushButton:pressed { background:%(tree)s; }
-QPushButton#Analyze, QPushButton#Make, QPushButton#AddM { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
-QPushButton#Analyze:hover, QPushButton#Make:hover, QPushButton#AddM:hover { background:%(primaryHover)s; }
+QPushButton#Analyze, QPushButton#Make { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
+QPushButton#Analyze:hover, QPushButton#Make:hover { background:%(primaryHover)s; }
 QPushButton#Close { color:%(muted)s; }
 QCheckBox { spacing:6px; margin:0px 3px; }
 QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:%(bw)s solid %(border2)s; background:%(panel)s; }
@@ -984,12 +1788,6 @@ for o in ORDERS:
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
-UNDO = []           # copie di MARKS prima di ogni modifica ("Annulla")
-CURSOR = [0.0]      # cursore dell'editor (s)
-ED = {}             # finestra dell'editor dei marker (creata alla prima apertura)
-ED_W, OV_H, WV_H = 900, 44, 140
-ZOOMS = {"Zoom 4 s": 4.0, "Zoom 8 s": 8.0, "Zoom 16 s": 16.0, "Zoom 32 s": 32.0}
-SNAP = 0.12         # s: "aggancia al beat" se un beat e' cosi' vicino
 
 
 def set_status(m):
@@ -1016,14 +1814,9 @@ def on_refresh(ev=None):
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPOS, BPM, INTENS, PEAKS, PEAK_HZ
-    stop_play()                          # nuova analisi: i marker vecchi non valgono piu'
-    MARKS[:], UNDO[:], CURSOR[0] = [], [], 0.0
-    if ED:
-        try:
-            ED["win"].Hide()
-        except Exception:
-            pass
+    global SHOTS, BEATS, BPOS, BPM, INTENS
+    MARKS[:] = []                        # nuova analisi: i marker vecchi non valgono piu'
+    SESSION[0] = "%x" % int(time.time() * 1000)
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -1037,7 +1830,6 @@ def on_analyze(ev):
     SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
-    PEAKS, PEAK_HZ = wave_peaks(os.path.join(_TMP, "_song.wav"))
     bars = sum(1 for p in BPOS if p == 0)
     set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
@@ -1057,17 +1849,9 @@ def _dur():
 
 
 # --------------------------------------------------------------------------
-# Editor dei marker (finestra a parte): la canzone con la forma d'onda, un solo
-# tipo di marker, ogni marker = un cambio clip
+# Editor dei marker (finestra a parte): un solo tipo di marker, ogni marker =
+# un cambio clip, l'ultimo = la fine del montaggio
 # --------------------------------------------------------------------------
-def _tc(t):
-    return "%d:%05.2f" % (int(t // 60), t % 60)
-
-
-def _song_dur():
-    return len(PEAKS) / PEAK_HZ if PEAKS else 0.0
-
-
 def _proj_fps():
     try:
         f = float(resolve.GetProjectManager().GetCurrentProject().GetSetting("timelineFrameRate"))
@@ -1080,366 +1864,38 @@ def marks_from_beats():
     return [b for _, b in _intervals(BEATS, BPOS, itm["Style"].CurrentText, _dur(), INTENS)]
 
 
-def _view():
-    """Finestra di tempo del dettaglio, centrata sul cursore."""
-    d = _song_dur()
-    z = min(d, ZOOMS.get(ED["itm"]["Zoom"].CurrentText, 8.0)) or 1.0
-    t0 = max(0.0, min(CURSOR[0] - z / 2.0, d - z))
-    return t0, t0 + z
-
-
-def _nearest(t):
-    if not MARKS:
-        return None
-    return min(range(len(MARKS)), key=lambda i: abs(MARKS[i] - t))
-
-
-def ed_refresh():
-    if not ED or not PEAKS:
-        return
-    it = ED["itm"]
-    t0, t1 = _view()
-    near = _nearest(CURSOR[0])
-    if near is not None and not t0 <= MARKS[near] <= t1:
-        near = None                          # evidenziato solo se si vede
-    ED["n"] += 1
-    po = os.path.join(_TMP, "_ov%d.png" % ED["n"])
-    pw = os.path.join(_TMP, "_wv%d.png" % ED["n"])
-    render_wave(po, ED_W, OV_H, 0.0, _song_dur(), MARKS, CURSOR[0], band=(t0, t1),
-                theme=THEME, ticks=True)
-    render_wave(pw, ED_W, WV_H, t0, t1, MARKS, CURSOR[0], near, BEATS, theme=THEME)
-    try:
-        it["Over"].Icon = ui.Icon({"File": po})
-        it["Over"].IconSize = [ED_W, OV_H]
-        it["Wave"].Icon = ui.Icon({"File": pw})
-        it["Wave"].IconSize = [ED_W, WV_H]
-    except Exception:
-        pass
-    for p in ("_ov%d.png", "_wv%d.png"):     # file nuovi a ogni disegno: niente cache di Qt
-        try:
-            os.remove(os.path.join(_TMP, p % (ED["n"] - 3)))
-        except OSError:
-            pass
-    gaps = [b - a for a, b in zip([0.0] + MARKS, MARKS)]
-    it["EdInfo"].Text = ("cursore %s   ·   %d marker%s   ·   vista %s – %s"
-                         % (_tc(CURSOR[0]), len(MARKS),
-                            ("   ·   stacco più corto %.2f s" % min(gaps)) if gaps else "",
-                            _tc(t0), _tc(t1)))
-
-
-def _set_cursor(t, from_slider=False):
-    CURSOR[0] = max(0.0, min(_song_dur(), t))
-    if not from_slider:
-        ED["lock"] = True
-        try:
-            ED["itm"]["Pos"].Value = int(round(CURSOR[0] * 100))
-        except Exception:
-            pass
-        ED["lock"] = False
-    ed_refresh()
-
-
-def _change(fn):
-    """Modifica i marker salvando prima una copia per 'Annulla'."""
-    UNDO.append(list(MARKS))
-    del UNDO[:-200]
-    fn()
-    MARKS.sort()
-
-
-def _ev_x(ev):
-    """Ascissa del clic sull'immagine (il formato dell'evento non e' documentato,
-    si provano le forme possibili; se non c'e', restano cursore e pulsanti)."""
-    for k in ("Pos", "pos", "Position", "MousePos"):
-        try:
-            p = ev[k]
-        except Exception:
-            continue
-        if isinstance(p, dict):
-            for kk in (1, 1.0, "1", "x", "X"):
-                if kk in p:
-                    return float(p[kk])
-        if isinstance(p, (list, tuple)) and p:
-            return float(p[0])
-    for k in ("X", "x"):
-        try:
-            return float(ev[k])
-        except Exception:
-            pass
-    return None
-
-
-def _add_marker(t):
-    if ED["itm"]["Snap"].Checked and BEATS:
-        b = min(BEATS, key=lambda v: abs(v - t))
-        if abs(b - t) <= SNAP:
-            t = b                            # premuto un filo prima o dopo: sul beat
-    if t <= 0 or any(abs(m - t) < 1.0 / _proj_fps() for m in MARKS):
-        return
-    _change(lambda: MARKS.append(t))
-    if PLAY["on"]:
-        ed_refresh()
-    else:
-        _set_cursor(t)
-
-
-def _near_visible():
-    i = _nearest(CURSOR[0])
-    t0, t1 = _view()
-    return i if i is not None and t0 <= MARKS[i] <= t1 else None
-
-
-def _nudge(frames):
-    i = _near_visible()
-    if i is None:
-        return
-    t = max(0.01, MARKS[i] + frames / _proj_fps())
-
-    def mv():
-        MARKS[i] = t
-    _change(mv)
-    _set_cursor(t)
-
-
-def ed_pos(ev):
-    if not ED.get("lock"):
-        _set_cursor(ED["itm"]["Pos"].Value / 100.0, from_slider=True)
-
-
-def ed_wave_click(ev):
-    x = _ev_x(ev)
-    if x is None:
-        return
-    t0, t1 = _view()
-    t = t0 + (t1 - t0) * x / ED_W
-    i = _nearest(t)
-    if i is not None and abs(MARKS[i] - t) * ED_W / (t1 - t0) <= 6:
-        t = MARKS[i]                         # clic su un marker: lo prende
-    _set_cursor(t)
-
-
-def ed_wave_dbl(ev):
-    x = _ev_x(ev)
-    if x is not None:
-        t0, t1 = _view()
-        _add_marker(t0 + (t1 - t0) * x / ED_W)
-
-
-def ed_over_click(ev):
-    x = _ev_x(ev)
-    if x is not None:
-        _set_cursor(_song_dur() * x / ED_W)
-
-
-def ed_add(ev):
-    pt = play_time()
-    _add_marker(pt if pt is not None else CURSOR[0])
-
-
-def ed_del(ev):
-    i = _near_visible()
-    if i is not None:
-        _change(lambda: MARKS.pop(i))
-        ed_refresh()
-
-
-def ed_prev(ev):
-    p = [m for m in MARKS if m < CURSOR[0] - 0.005]
-    if p:
-        _set_cursor(p[-1])
-
-
-def ed_next(ev):
-    n = [m for m in MARKS if m > CURSOR[0] + 0.005]
-    if n:
-        _set_cursor(n[0])
-
-
-def ed_play(ev):
-    if not play_from(SONG.GetClipProperty("File Path") or "", CURSOR[0]):
-        ED["itm"]["EdHint"].Text = "Ascolto non disponibile su questo computer."
-        return
-    try:
-        ED["timer"].Start()
-    except Exception:
-        pass
-    try:
-        ED["itm"]["AddM"].SetFocus()         # cosi' anche la barra spaziatrice mette un marker
-    except Exception:
-        pass
-
-
-def ed_stop(ev):
-    t = play_time()
-    stop_play()
-    if t is not None:
-        _set_cursor(t)
-
-
-def ed_tick(ev=None):
-    t = play_time()
-    if t is None:
-        try:
-            ED["timer"].Stop()
-        except Exception:
-            pass
-        return
-    _set_cursor(t)
-
-
-def ed_undo(ev):
-    if UNDO:
-        MARKS[:] = UNDO.pop()
-        ed_refresh()
-
-
-def ed_regen(ev):
-    new = marks_from_beats()
-
-    def put():
-        MARKS[:] = new
-    _change(put)
-    ed_refresh()
-
-
-def ed_clear(ev):
-    _change(lambda: MARKS.__delitem__(slice(None)))
-    ed_refresh()
-
-
-def ed_close(ev=None):
-    stop_play()
-    try:
-        ED["win"].Hide()
-    except Exception:
-        pass
-    set_log("%d marker pronti: ogni marker è un cambio clip, l'ultimo è la fine.\n"
-            "Premi 'Monta' per mettere una clip tra un marker e l'altro." % len(MARKS))
-    set_status("Marker: %d. Premi 'Monta'." % len(MARKS))
-
-
-def _editor_layout(rich):
-    ev = {"Events": {"MousePress": True, "MouseDoubleClick": True}} if rich else {}
-
-    def img(id_, h):
-        d = {"ID": id_, "Flat": True, "Weight": 0,
-             "MinimumSize": [ED_W, h], "MaximumSize": [ED_W, h]}
-        d.update(ev)
-        return ui.Button(d)
-    slider = {"ID": "Pos", "Weight": 0}
-    if rich:
-        slider["Orientation"] = "Horizontal"
-    return ui.VGroup({"Spacing": 6, "Margin": 14}, [
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Label({"ID": "EdHeader", "Text": "Marker", "Weight": 0}),
-            ui.Label({"ID": "EdInfo", "Text": "", "Weight": 1,
-                      "Alignment": {"AlignRight": True, "AlignVCenter": True}}),
-        ]),
-        img("Over", OV_H),
-        img("Wave", WV_H),
-        ui.Slider(slider),
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Play", "Text": "▶  Ascolta", "Weight": 2}),
-            ui.Button({"ID": "Stop", "Text": "■  Stop", "Weight": 2}),
-            ui.Button({"ID": "PrevM", "Text": "◀ Marker", "Weight": 2}),
-            ui.Button({"ID": "NextM", "Text": "Marker ▶", "Weight": 2}),
-            ui.Button({"ID": "AddM", "Text": "+  Marker", "Weight": 3}),
-            ui.Button({"ID": "DelM", "Text": "–  Marker", "Weight": 2}),
-            ui.Button({"ID": "NudL", "Text": "◀ 1 fot.", "Weight": 2}),
-            ui.Button({"ID": "NudR", "Text": "1 fot. ▶", "Weight": 2}),
-        ]),
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.ComboBox({"ID": "Zoom", "Weight": 2}),
-            ui.CheckBox({"ID": "Snap", "Text": "aggancia al beat", "Checked": True, "Weight": 3}),
-            ui.Button({"ID": "Undo", "Text": "↶  Annulla", "Weight": 2}),
-            ui.Button({"ID": "Regen", "Text": "↺  Rifai dai beat", "Weight": 3}),
-            ui.Button({"ID": "Clear", "Text": "Svuota", "Weight": 2}),
-            ui.Button({"ID": "EdClose", "Text": "✓  Fatto", "Weight": 2}),
-        ]),
-        ui.Label({"ID": "EdHint", "Weight": 0, "WordWrap": True, "Text": (
-            "Ogni marker è un cambio clip. Premi Ascolta e poi + Marker a tempo: si aggancia "
-            "al beat più vicino. Il cursore (linea arancione) si sposta con la barra sotto le "
-            "immagini o con un clic sulla forma d'onda; doppio clic = nuovo marker. "
-            "Togli e ◀ 1 fot. / 1 fot. ▶ agiscono sul marker evidenziato, il più vicino "
-            "al cursore.")}),
-    ])
-
-
-def _build_editor():
-    ed = None
-    for rich in (True, False):               # se la build non accetta eventi/orientamento
-        try:
-            ed = disp.AddWindow({"ID": "BTMarkWin", "WindowTitle": "BeaTonic · Marker",
-                                 "Geometry": [150, 130, ED_W + 40, 470],
-                                 "StyleSheet": STYLE_FOR[THEME]}, [_editor_layout(rich)])
-            break
-        except Exception:
-            ed = None
-    if ed is None:
-        return False
-    it = ed.GetItems()
-    ED.update(win=ed, itm=it, n=0, lock=False, timer=None)
-    for z in ZOOMS:
-        it["Zoom"].AddItem(z)
-    try:
-        it["Zoom"].CurrentIndex = 1          # 8 s
-    except Exception:
-        pass
-    for k, fn in (("Play", ed_play), ("Stop", ed_stop), ("PrevM", ed_prev),
-                  ("NextM", ed_next), ("AddM", ed_add), ("DelM", ed_del),
-                  ("NudL", lambda e: _nudge(-1)), ("NudR", lambda e: _nudge(1)),
-                  ("Undo", ed_undo), ("Regen", ed_regen), ("Clear", ed_clear),
-                  ("EdClose", ed_close)):
-        setattr(getattr(ed.On, k), "Clicked", fn)
-    ed.On.Pos.ValueChanged = ed_pos
-    ed.On.Zoom.CurrentIndexChanged = lambda e: ed_refresh()
-    ed.On.BTMarkWin.Close = ed_close
-    for el, evn, fn in (("Wave", "MousePress", ed_wave_click),
-                        ("Wave", "MouseDoubleClick", ed_wave_dbl),
-                        ("Over", "MousePress", ed_over_click)):
-        try:
-            setattr(getattr(ed.On, el), evn, fn)
-        except Exception:
-            pass
-    try:                                     # timer per far scorrere il cursore mentre suona
-        ED["timer"] = ui.Timer({"ID": "BTTimer", "Interval": 100})
-    except Exception:
-        ED["timer"] = None
-    for bind in (lambda: setattr(ed.On.BTTimer, "Timeout", ed_tick),
-                 lambda: setattr(disp.On, "Timeout", ed_tick)):
-        try:
-            bind()
-        except Exception:
-            pass
-    return True
-
-
 def on_mark(ev):
-    """Apre l'editor dei marker: la canzone con la forma d'onda e i punti di stacco."""
-    if not BEATS or not SONG or not PEAKS:
+    """Apre l'editor dei marker con la canzone, la forma d'onda e i punti di stacco."""
+    if not BEATS or not SONG:
         set_log("Prima premi 'Analizza'."); return
-    if not MARKS:
+    saved = editor_marks()
+    if saved is not None:                # riapre con le modifiche gia' fatte
+        MARKS[:] = saved
+    elif not MARKS:
         MARKS[:] = marks_from_beats()
-    if not ED and not _build_editor():
-        set_log("Impossibile aprire l'editor dei marker."); return
-    try:
-        ED["itm"]["Pos"].Minimum = 0
-        ED["itm"]["Pos"].Maximum = max(1, int(_song_dur() * 100))
-    except Exception:
-        pass
-    ED["win"].Show()
-    _set_cursor(CURSOR[0])
-    set_log("EDITOR MARKER: %d marker (stile %s). Ogni marker è un cambio clip.\n"
-            "Sistemali, poi 'Fatto' e 'Monta'."
-            % (len(MARKS), itm["Style"].CurrentText.split()[0]))
-    set_status("Editor marker aperto.")
+    set_status("Apro l'editor dei marker…")
+    ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
+                           itm["Style"].CurrentText, _dur(), THEME)
+    if not ok:
+        set_log(info); set_status(info); return
+    set_log("EDITOR DEI MARKER aperto in una finestra a parte (%d marker).\n\n"
+            "Lavora lì: trascina per scorrere, rotella per lo zoom, passa col mouse "
+            "sull'onda per ascoltare, Spazio = play, M = marker, trascina un marker per "
+            "spostarlo, clic destro per toglierlo. Si salva da solo.\n\n"
+            "Quando hai finito torna qui e premi 'Monta': una clip tra un marker e "
+            "l'altro, l'ultimo marker è la fine.\n\n"
+            "(Se la finestra non si è aperta: %s)" % (len(MARKS), info))
+    set_status("Editor aperto: sistema i marker, poi 'Monta'.")
 
 
 def on_make(ev):
     if not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     style = itm["Style"].CurrentText
-    if MARKS:                            # i marker dell'editor (come li hai lasciati)
+    saved = editor_marks()               # i marker salvati dall'editor (come li hai lasciati)
+    if saved is not None:
+        MARKS[:] = saved
+    if MARKS:
         bounds = [0.0] + MARKS
         ivs = list(zip(bounds, bounds[1:]))
         tag, src = "marker", "dai %d marker dell'editor" % len(MARKS)
@@ -1453,16 +1909,11 @@ def on_make(ev):
                   ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
                   bool(itm["Reuse"].Checked), set_log)
     set_log(msg + "\nStacchi presi " + src + ".")
-    set_status(msg[:80])
+    set_status(msg.split("\n")[0][:90])
 
 
 def on_close(ev):
-    stop_play()
-    if ED:
-        try:
-            ED["win"].Hide()
-        except Exception:
-            pass
+    stop_editor()
     disp.ExitLoop()
 
 
@@ -1492,12 +1943,6 @@ def apply_theme(name):
                                 else "☾  Tema Studio")
     except Exception:
         pass
-    if ED:                               # anche l'editor dei marker (e i suoi colori)
-        try:
-            ED["win"].SetStyleSheet(STYLE_FOR[name])
-        except Exception:
-            pass
-        ed_refresh()
     save_theme(name)
 
 
