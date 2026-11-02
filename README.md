@@ -73,9 +73,11 @@ condivisa con PlutoniCut.
 2. **Aggiorna selezione** → controlla che veda N clip + la canzone.
 3. **Analizza**: ffmpeg trova i cambi di scena e i beat.
    *(È l'operazione lenta: la finestra resta ferma mentre lavora.)*
-   - **Sensibilità scene**: `0.4` è la consigliata; più bassa = divide di più.
-   - **Non dividere (clip intere)**: ogni video resta un pezzo unico, nessuna
-     scene detection (utile se il materiale è un piano unico o se divide troppo).
+   - Le clip vengono divise sia agli **stacchi** veri sia ai **cambi d'inquadratura**
+     dentro una ripresa continua (la camera si sposta su un altro soggetto).
+   - **Sensibilità scene**: *Media* è la consigliata; *Alta* trova più divisioni;
+     *Bassa* tiene solo gli stacchi e i cambi più netti.
+   - **Non dividere (clip intere)**: ogni video resta un pezzo unico.
 4. Scegli **stile**, **formato**, **durata** e l'**ordine** delle clip:
 
    | Ordine | Cosa fa |
@@ -139,9 +141,15 @@ tagli ogni due fotogrammi.
   nessuno slittamento che si accumula. Con clip allo stesso fps della timeline o più
   alto gli stacchi sono esatti; con clip a fps più basso (es. 23,976 in timeline 25)
   qualche stacco può cadere a 1 fotogramma dal marker, mai di più.
-- **Scene**: i cambi scena più vicini di 1,5 s vengono ignorati (sono quasi sempre
-  falsi: movimento veloce, flash, luce che cambia), così lo stesso piano non viene
-  spezzato a caso.
+- **Stacchi (metodo adattivo)**, come l'AdaptiveDetector di PySceneDetect: conta
+  quanto un fotogramma *spicca* rispetto ai vicini, non una soglia fissa. Così una
+  panoramica o un movimento veloce non tagliano, e uno stacco tra due inquadrature
+  simili sì. I **flash** vengono scartati: dopo uno stacco vero l'immagine resta
+  diversa, dopo un flash torna com'era.
+- **Cambi d'inquadratura**: confronta l'immagine media del secondo prima con quella
+  del secondo dopo (mani e persone in movimento si smussano, l'esposizione non conta)
+  e divide solo dove il cambio spicca sul movimento tipico di quella clip; ogni pezzo
+  dura almeno 3 s.
 - Dà il meglio sui brani ritmici in 4/4; su pezzi senza percussioni (piano, ambient)
   il beat è più incerto.
 - Il verticale da sorgenti orizzontali ritaglia/adatta secondo le impostazioni di conforma.

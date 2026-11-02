@@ -69,16 +69,105 @@ AUDIO_EXT = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".aif", "
 # --------------------------------------------------------------------------
 # Analisi: scene cut (ffmpeg) + beat (ffmpeg decode + DSP)
 # --------------------------------------------------------------------------
-def scene_cuts(path, thresh=0.3):
-    """Tempi (s) dei cambi di scena nel file."""
-    if not FFMPEG:
+def _reframes(thumbs, times, rf_ratio, rf_abs):
+    """CAMBI D'INQUADRATURA dentro una ripresa continua (la camera si sposta su un altro
+    soggetto, senza stacco): si confronta l'immagine MEDIA del secondo prima con quella
+    del secondo dopo. La media smussa mani e persone che si muovono; normalizzando
+    luminosita' e contrasto conta la struttura dell'immagine, non l'esposizione.
+    Vale come cambio solo un picco che spicca sul movimento tipico di QUELLA clip.
+    Ritorna [(tempo s, forza), ...]."""
+    n = min(len(thumbs), len(times))
+    if n < 20 or times[n - 1] <= times[0]:
         return []
-    p = subprocess.run([FFMPEG, "-i", path, "-vf",
-                        "select='gt(scene,%s)',metadata=print:file=-" % thresh,
-                        "-an", "-f", "null", "-"],
-                       capture_output=True, text=True, creationflags=_NOWIN)
-    txt = (p.stdout or "") + (p.stderr or "")
-    return [float(m) for m in re.findall(r"pts_time:([0-9.]+)", txt)]
+    fps = (n - 1) / (times[n - 1] - times[0])
+    sub = list(range(0, n, max(1, int(round(fps / 5.0)))))   # ~5 campioni al secondo
+
+    def nmean(idx):
+        m = [sum(thumbs[i][j] for i in idx) / float(len(idx)) for j in range(144)]
+        mu = sum(m) / 144.0
+        sd = (sum((v - mu) ** 2 for v in m) / 144.0) ** 0.5 or 1.0
+        return [(v - mu) / sd for v in m]
+
+    cv = [0.0] * len(sub)
+    for q in range(5, len(sub) - 4):
+        a, b = nmean(sub[q - 5:q]), nmean(sub[q:q + 5])
+        cv[q] = 100.0 * sum(abs(x - y) for x, y in zip(a, b)) / 144.0
+    pos = sorted(v for v in cv if v > 0)
+    if not pos:
+        return []
+    med = pos[len(pos) // 2]
+    out = []
+    for q, v in enumerate(cv):
+        if v >= rf_abs and v >= rf_ratio * med and v == max(cv[max(0, q - 7):q + 8]):
+            out.append((times[sub[q]], v))
+    return out
+
+
+def scene_cuts(path, ratio=3.0, min_abs=0.06, rf_ratio=2.5, rf_abs=20.0, side=3):
+    """Cambi di scena col metodo ADATTIVO (come l'AdaptiveDetector di PySceneDetect):
+    ffmpeg da' il punteggio di differenza di OGNI fotogramma; e' uno stacco solo se
+    quel punteggio SPICCA rispetto ai fotogrammi vicini (>= ratio volte la loro media).
+    Cosi' una panoramica o un movimento veloce (punteggi alti ma continui) non tagliano,
+    e uno stacco tra due inquadrature simili (punteggio basso ma isolato) si'.
+    I FLASH vengono scartati: nella stessa passata ffmpeg da' anche una miniatura 16x9
+    di ogni fotogramma; dopo uno stacco vero l'immagine RESTA diversa da prima, dopo un
+    flash torna com'era. Le stesse miniature servono a trovare i cambi d'inquadratura.
+    Ritorna ([(tempo, forza) stacchi], [(tempo, forza) cambi d'inquadratura])."""
+    if not FFMPEG:
+        return [], []
+    meta = "_scene_meta.txt"            # relativo a _TMP: niente "C:" nel filtro
+    fc = ("[0:v]scale=192:-2,split=2[a][b];"
+          "[a]select='gte(scene,0)',metadata=print:file=%s[m];"
+          "[b]scale=16:9,format=gray[g]" % meta)
+    try:
+        os.remove(os.path.join(_TMP, meta))
+    except OSError:
+        pass
+    p = subprocess.run([FFMPEG, "-y", "-i", path, "-filter_complex", fc,
+                        "-map", "[m]", "-f", "null", os.devnull,
+                        "-map", "[g]", "-f", "rawvideo", "-"],
+                       capture_output=True, cwd=_TMP, creationflags=_NOWIN)
+    raw = p.stdout or b""
+    thumbs = [raw[k:k + 144] for k in range(0, len(raw) - 143, 144)]
+    try:
+        with open(os.path.join(_TMP, meta), "r") as f:
+            txt = f.read()
+    except OSError:
+        return [], []
+
+    def diff(a, b):                     # differenza media tra due miniature (0..255)
+        if a < 0 or b >= len(thumbs):
+            return None
+        x, y = thumbs[a], thumbs[b]
+        return sum(abs(x[j] - y[j]) for j in range(144)) / 144.0
+
+    times, scores = [], []
+    for line in txt.splitlines():
+        m = re.search(r"pts_time:([0-9.]+)", line)
+        if m:
+            times.append(float(m.group(1)))
+            continue
+        m = re.search(r"scene_score=([0-9.]+)", line)
+        if m:
+            scores.append(float(m.group(1)))
+    n = min(len(times), len(scores))
+    cand = []
+    for i in range(1, n):
+        s = scores[i]
+        if s < min_abs:
+            continue
+        nb = scores[max(0, i - side):i] + scores[i + 1:min(n, i + 1 + side)]
+        avg = sum(nb) / len(nb) if nb else 0.0
+        if s >= ratio * max(avg, 0.005):
+            cand.append(i)
+    cuts = []
+    for i in cand:
+        jump = diff(i - 1, i)
+        after = [d for d in (diff(i - 1, i + k) for k in (1, 2, 3, 4)) if d is not None]
+        if jump and after and min(after) < 0.4 * jump:
+            continue                        # torna com'era prima: flash, non stacco
+        cuts.append((times[i], scores[i]))
+    return cuts, _reframes(thumbs, times, rf_ratio, rf_abs)
 
 
 def _decode_mono(path, sr=11025, af=None, name="_song.wav"):
@@ -300,35 +389,53 @@ def _clip_dur_sec(c):
         return 0.0
 
 
-MIN_SCENE = 1.5   # s: cambi scena piu' vicini di cosi' sono quasi sempre falsi
-                  # (movimento veloce, flash, luce che cambia) e vengono ignorati
+MIN_SCENE = 0.6   # s: due stacchi piu' vicini di cosi' -> si tiene il piu' netto
+MIN_TAKE = 3.0    # s: un cambio d'inquadratura crea pezzi lunghi almeno cosi'
+SENS = {          # (stacco: quanto spicca, minimo | inquadratura: quanto spicca, minimo)
+    "Media (consigliata)": (3.0, 0.06, 2.5, 20.0),
+    "Alta (trova di piu')": (2.2, 0.035, 2.0, 12.0),
+    "Bassa (solo stacchi netti)": (4.5, 0.10, 3.0, 30.0),
+    "Non dividere (clip intere)": None,
+}
 
 
-def build_shots(videos, thresh, split, set_log):
-    """Spezza ogni clip ai cambi di scena -> lista di shot {clip,fps,in,out}.
-    Con split=False ogni clip resta UNA shot intera (niente scene detection)."""
-    shots = []
+def build_shots(videos, params, set_log):
+    """Spezza ogni clip ai cambi di scena e d'inquadratura -> (shot {clip,fps,in,out},
+    n. stacchi, n. cambi d'inquadratura). Con params=None ogni clip resta intera."""
+    shots, n_cut, n_ref = [], 0, 0
     for i, c in enumerate(videos, 1):
         path = c.GetClipProperty("File Path") or ""
         fps = _clip_fps(c)
         dur = _clip_dur_sec(c)
-        if not split or not path:
+        if not params or not path:
             if dur > 0.1:
                 shots.append({"clip": c, "fps": fps, "in": 0.0, "out": dur})
             continue
         set_log("Analisi scene %d/%d: %s…" % (i, len(videos), c.GetName()))
-        bounds = [0.0]
-        for t in scene_cuts(path, thresh):
-            if t - bounds[-1] >= MIN_SCENE and dur - t >= MIN_SCENE:
+        cuts, refr = scene_cuts(path, *params)
+        kept = []
+        for t, s in cuts:
+            if t < MIN_SCENE or dur - t < MIN_SCENE:
+                continue
+            if kept and t - kept[-1][0] < MIN_SCENE:
+                if s > kept[-1][1]:
+                    kept[-1] = (t, s)       # troppo vicini: vince lo stacco piu' netto
+                continue
+            kept.append((t, s))
+        bounds = [0.0] + [t for t, _ in kept] + [dur]
+        n_cut += len(kept)
+        for t, v in sorted(refr, key=lambda x: -x[1]):    # i cambi piu' netti prima
+            if all(abs(t - b) >= MIN_TAKE for b in bounds):
                 bounds.append(t)
-        bounds.append(dur)
+                n_ref += 1
+        bounds.sort()
         for a, b in zip(bounds, bounds[1:]):
             shots.append({"clip": c, "fps": fps, "in": a, "out": b})
-    return shots
+    return shots, n_cut, n_ref
 
 
 # --------------------------------------------------------------------------
-# Montaggio (tape continuo di shot, tagliato sui beat)
+# Montaggio: una shot per stacco, stacchi esatti al fotogramma
 # --------------------------------------------------------------------------
 STYLES = {
     "Veloce (ogni beat)": "beat",
@@ -760,8 +867,7 @@ try:
         itm["Logo"].IconSize = [58, 44]
 except Exception:
     pass
-for c in ["0.4 (consigliata)", "0.3 (media)", "0.2 (sensibile)", "0.6 (minima)",
-          "Non dividere (clip intere)"]:
+for c in SENS:
     itm["Sens"].AddItem(c)
 for s in STYLES:
     itm["Style"].AddItem(s)
@@ -807,11 +913,10 @@ def on_analyze(ev):
         set_log("Nessuna clip video selezionata nel Media Pool."); return
     if not SONG:
         set_log("Nessuna canzone (clip audio) selezionata nel Media Pool."); return
-    sens_txt = itm["Sens"].CurrentText or "0.4"
-    split = not sens_txt.startswith("Non")
-    sens = float(sens_txt.split()[0]) if split else 0.4
+    params = SENS.get(itm["Sens"].CurrentText, SENS["Media (consigliata)"])
+    split = params is not None
     set_status("Analisi in corso (la finestra resta ferma)…")
-    SHOTS = build_shots(VIDEOS, sens, split, set_log)
+    SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
     bars = sum(1 for p in BPOS if p == 0)
@@ -819,7 +924,8 @@ def on_analyze(ev):
             "%d battute (stacco minimo %.2fs).\n\n"
             "Ora scegli stile/durata/formato/ordine. Premi 'Marker sui beat' per vedere "
             "e sistemare i tagli sulla canzone, oppure direttamente 'Monta'."
-            % (len(SHOTS), len(VIDEOS), "divise ai cambi scena" if split else "intere",
+            % (len(SHOTS), len(VIDEOS),
+               ("%d stacchi + %d cambi d'inquadratura" % (n_cut, n_ref)) if split else "intere",
                BPM, len(BEATS), bars, MIN_CUT))
     set_status("Analisi ok: %d shot · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
