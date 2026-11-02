@@ -86,7 +86,20 @@ condivisa con PlutoniCut.
 
    La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
    della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
-5. **Monta a tempo** → nasce la timeline con la canzone su A1 e le shot sui beat.
+5. **◆ Marker sui beat** *(facoltativo, consigliato)* → nasce una timeline con la sola
+   canzone e un **marker a ogni punto di taglio**: rosso = inizio battuta, ciano = beat.
+   Ascoltala e sistema i tagli come vuoi:
+   - **spostare** un taglio: trascina il marker sul righello;
+   - **toglierlo**: clic sul marker e `Canc`;
+   - **aggiungerne uno**: porta la testina dove vuoi e premi `M`.
+
+   L'ultimo marker è la **fine** del montaggio.
+6. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
+   e l'altro**, esattamente sui fotogrammi dei marker (che restano anche nel montato).
+   Se hai saltato il punto 5, taglia direttamente sui beat dello stile scelto.
+
+> Puoi ritoccare i marker e premere **Monta** quante volte vuoi: ogni volta nasce una
+> timeline nuova. Una nuova **Analizza** riparte da zero (i marker vecchi non contano più).
 
 **Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
 ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si
@@ -121,6 +134,11 @@ tagli ogni due fotogrammi.
   cadono entro 13 ms da quelli veri: meno di un terzo di fotogramma.
 - Il montaggio parte da 0 insieme alla canzone (un'intro senza beat viene coperta da
   clip intere divise in parti uguali) e chiude sull'inizio di una battuta.
+- **Stacchi al fotogramma**: dopo ogni clip il plugin legge dove è finita davvero in
+  timeline e calcola la successiva per arrivare esattamente al marker dopo, quindi
+  nessuno slittamento che si accumula. Con clip allo stesso fps della timeline o più
+  alto gli stacchi sono esatti; con clip a fps più basso (es. 23,976 in timeline 25)
+  qualche stacco può cadere a 1 fotogramma dal marker, mai di più.
 - **Scene**: i cambi scena più vicini di 1,5 s vengono ignorati (sono quasi sempre
   falsi: movimento veloce, flash, luce che cambia), così lo stesso piano non viene
   spezzato a caso.

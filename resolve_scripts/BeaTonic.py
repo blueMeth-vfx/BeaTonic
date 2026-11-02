@@ -5,8 +5,11 @@ Montaggio ritmato a tempo di musica:
   1) Selezioni nel Media Pool le CLIP video (sorgenti) + la CANZONE (clip audio).
   2) "Analizza": ffmpeg rileva i cambi di scena nelle clip (le spezza in shot) e
      i BEAT della canzone.
-  3) Scegli stile, durata e formato (orizzontale/verticale).
-  4) "Monta": crea una timeline con la canzone e le shot tagliate SUI BEAT.
+  3) Scegli stile, durata, formato e ordine. Facoltativo: "Marker sui beat" crea una
+     timeline con la canzone e un marker a ogni punto di stacco, da ascoltare e
+     sistemare a mano (spostare, togliere, aggiungere col tasto M).
+  4) "Monta": crea una timeline con la canzone e una shot tra un marker e l'altro
+     (o, senza marker, direttamente sui beat).
 
 Richiede ffmpeg (rilevato in automatico). Self-contained, zero dipendenze Python.
 """
@@ -413,22 +416,103 @@ def order_shots(shots, mode):
     return tape                                            # "selezione": come selezionate
 
 
-def montage(shots, song, beats, bpos, style, dur, fmt, order_mode, reuse, intens, set_log):
+def _new_timeline(mp, base):
+    new = mp.CreateEmptyTimeline(base)
+    n = 2
+    while new is None and n < 100:
+        new = mp.CreateEmptyTimeline("%s_%d" % (base, n)); n += 1
+    return new
+
+
+def _put_song(mp, song, ns, frames=None):
+    """Canzone su A1 dall'inizio della timeline: lunga 'frames', o intera se None."""
+    info = {"mediaPoolItem": song, "recordFrame": ns, "trackIndex": 1, "mediaType": 2}
+    if frames:
+        info.update({"startFrame": 0, "endFrame": int(frames)})
+    try:
+        mp.AppendToTimeline([info])
+    except Exception:
+        pass
+
+
+def marker_timeline(song, ivs, beats, bpos, tag):
+    """Timeline con la sola canzone (intera) e un marker a ogni punto di stacco:
+    rosso = inizio battuta, ciano = beat. Si sistemano a mano prima di montare."""
+    proj = resolve.GetProjectManager().GetCurrentProject()
+    mp = proj.GetMediaPool()
+    new = _new_timeline(mp, "BeaTonic_marker_%s" % tag)
+    if new is None:
+        return None, 0
+    proj.SetCurrentTimeline(new)
+    fps = _tl_fps(new)
+    sec = _clip_dur_sec(song)
+    _put_song(mp, song, new.GetStartFrame(), int(round(sec * fps)) if sec else None)
+    downs = set(t for t, p in zip(beats, bpos) if p == 0)
+    n, used = 0, set()
+    for _, b in ivs:
+        f = int(round(b * fps))
+        if f <= 0 or f in used:
+            continue
+        used.add(f)
+        one = b in downs
+        try:
+            if new.AddMarker(f, "Red" if one else "Cyan", "1" if one else "beat",
+                             "BeaTonic: punto di stacco", 1):
+                n += 1
+        except Exception:
+            pass
+    return new, n
+
+
+def find_timeline(uid):
+    proj = resolve.GetProjectManager().GetCurrentProject()
+    for i in range(1, int(proj.GetTimelineCount() or 0) + 1):
+        t = proj.GetTimelineByIndex(i)
+        try:
+            if t and (t.GetUniqueId() == uid or t.GetName() == uid):
+                return t
+        except Exception:
+            pass
+    return None
+
+
+def marker_cuts(tl):
+    """Punti di stacco = TUTTI i marker della timeline, anche quelli aggiunti a mano,
+    piu' quelli messi sulla clip della canzone (M con la clip selezionata).
+    Ritorna ([frame dall'inizio, in ordine], {frame: info marker})."""
+    marks = {}
+    try:
+        for f, info in (tl.GetMarkers() or {}).items():
+            marks[int(round(float(f)))] = info
+    except Exception:
+        pass
+    ns = tl.GetStartFrame()
+    try:
+        for it in tl.GetItemListInTrack("audio", 1) or []:
+            off = it.GetStart() - ns
+            for f, info in (it.GetMarkers() or {}).items():
+                marks.setdefault(off + int(round(float(f))), info)
+    except Exception:
+        pass
+    return sorted(f for f in marks if f > 0), marks
+
+
+def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, marks=None):
+    """Monta le shot negli intervalli ivs [(inizio s, fine s), ...] che partono da 0.
+    Ogni stacco cade ESATTAMENTE sul suo fotogramma: dopo ogni clip si legge dove e'
+    finita davvero e la successiva si calcola per arrivare al punto dopo (nessuno
+    slittamento che si accumula, anche con clip a fps diversi dalla timeline)."""
     proj = resolve.GetProjectManager().GetCurrentProject()
     mp = proj.GetMediaPool()
     if not shots:
         return "Nessuna shot: analizza prima le clip."
-    if not beats or len(beats) < 2:
-        return "Beat non rilevati: controlla la canzone."
+    if not ivs:
+        return "Nessun punto di stacco."
     tape = order_shots(shots, order_mode)
 
-    new = mp.CreateEmptyTimeline("BeatCut_%s" % style.split()[0])
-    n = 2
-    while new is None and n < 100:
-        new = mp.CreateEmptyTimeline("BeatCut_%s_%d" % (style.split()[0], n)); n += 1
+    new = _new_timeline(mp, "BeaTonic_%s" % tag)
     if new is None:
         return "Impossibile creare la timeline."
-    # formato
     W, H = FORMATS.get(fmt, (1920, 1080))
     try:
         new.SetSetting("useCustomSettings", "1")
@@ -440,19 +524,12 @@ def montage(shots, song, beats, bpos, style, dur, fmt, order_mode, reuse, intens
     tl_fps = _tl_fps(new)
     ns = new.GetStartFrame()
 
-    ivs = _intervals(beats, bpos, style, dur, intens)
-    # Una shot NUOVA a ogni stacco: si passa alla successiva dopo ogni pezzo, cosi'
-    # due stacchi di fila non mostrano mai la stessa clip. Se una shot e' piu' corta
-    # dello stacco, lo si completa con la shot dopo (resta sul beat). Si ripete solo
-    # dopo aver usato TUTTE le shot, e ogni riuso parte da dove si era arrivati nella
-    # clip (parti diverse, non la stessa inquadratura). 'reuse' spento = stop alla fine.
     # Ogni stacco = UNA shot che lo copre tutto (niente code di pochi fotogrammi).
     # Si parte dalla shot successiva nell'ordine scelto, quindi due stacchi di fila
     # non mostrano la stessa clip; ogni ritorno a una clip ne mostra un pezzo nuovo.
     # Quando nessuna shot ha piu' abbastanza materiale nuovo: nuovo giro (riusa)
-    # oppure stop. Solo se nessuna shot e' lunga quanto lo stacco si uniscono pezzi,
-    # comunque mai piu' corti di MIN_PIECE.
-    MIN_PIECE = 0.25
+    # oppure stop. Uno stacco si spezza SOLO se nessuna shot e' lunga quanto lui
+    # (sarebbe un taglio in piu' rispetto ai marker), e mai sotto MIN_CUT.
     shot_i = [0]
     read_pos = {}          # id(shot) -> secondi gia' usati di quella shot (in questo giro)
     exhausted = [False]
@@ -481,24 +558,18 @@ def montage(shots, song, beats, bpos, style, dur, fmt, order_mode, reuse, intens
         if idx is not None:
             shot_i[0] = idx + 1
             return [take(tape[idx], length)]
-        # Nessuna shot e' lunga quanto lo stacco (es. un'intro lunga senza beat):
-        # lo si divide in parti UGUALI, ognuna coperta da una shot intera.
+        # Nessuna shot copre lo stacco da sola (es. un'intro lunga senza beat): lo si
+        # divide in parti UGUALI, mai piu' corte di MIN_CUT; se non si puo', si chiude.
         longest = max(remaining(s) for s in tape)
-        if longest < MIN_PIECE and reuse:
-            read_pos.clear()
-            longest = max(remaining(s) for s in tape)
-        if longest < MIN_PIECE:
+        n = int(math.ceil(length / longest - 1e-9)) if longest > 0.02 else 0
+        if not n or length / n < MIN_CUT:
             exhausted[0] = True
             return []
-        n = int(math.ceil(length / longest - 1e-9))
         part = length / n
         pieces = []
         for _ in range(n):
             idx = find_whole(part)
-            if idx is None and reuse:
-                read_pos.clear()
-                idx = find_whole(part)
-            if idx is None:                     # stacco monco: si chiude sul beat prima
+            if idx is None:                     # stacco monco: si chiude su quello prima
                 exhausted[0] = True
                 return []
             shot_i[0] = idx + 1
@@ -506,34 +577,48 @@ def montage(shots, song, beats, bpos, style, dur, fmt, order_mode, reuse, intens
         return pieces
 
     ok = 0
-    total_sec = 0.0
-    for (bs, be) in ivs:
-        pieces = pull(be - bs)
+    cur = ns                                    # dove finisce DAVVERO il montaggio
+    for _, be in ivs:
+        target = ns + int(round(be * tl_fps))   # fotogramma esatto del prossimo stacco
+        if target - cur <= 0:
+            continue
+        pieces = pull((target - cur) / tl_fps)
         if not pieces:
             break
-        for clip, cfps, si, so in pieces:
-            sf = int(round(si * cfps)); ef = int(round(so * cfps))
-            if ef <= sf:
-                ef = sf + 1
+        cur0, acc = cur, 0.0
+        for k, (clip, cfps, si, so) in enumerate(pieces):
+            acc += so - si
+            end = target if k == len(pieces) - 1 else cur0 + int(round(acc * tl_fps))
+            plen = end - cur                    # fotogrammi di timeline da riempire
+            if plen <= 0:
+                continue
+            sf = int(round(si * cfps))
+            ef = sf + max(1, int(round(plen * cfps / tl_fps)))
             info = {"mediaPoolItem": clip, "startFrame": sf, "endFrame": ef,
                     "trackIndex": 1, "mediaType": 1}
             try:
-                if mp.AppendToTimeline([info]):   # SEQUENZIALE = gapless, sui beat
-                    ok += 1
-                    total_sec += (so - si)
+                items = mp.AppendToTimeline([info])   # SEQUENZIALE = senza buchi
             except Exception:
-                pass
+                items = None
+            if items:
+                ok += 1
+                try:
+                    cur = items[0].GetStart() + items[0].GetDuration()
+                except Exception:
+                    cur += plen
         if exhausted[0]:
             break
-    # canzone su A1, dall'inizio, lunga quanto il montaggio
-    try:
-        send = int(round(total_sec * tl_fps))
-        mp.AppendToTimeline([{"mediaPoolItem": song, "startFrame": 0, "endFrame": send,
-                              "recordFrame": ns, "trackIndex": 1, "mediaType": 2}])
-    except Exception:
-        pass
-    return ("Montaggio '%s' creato: %d stacchi su ~%.0fs, stile %s, %s."
-            % (new.GetName(), ok, total_sec, style.split()[0], fmt))
+    frames = cur - ns
+    _put_song(mp, song, ns, frames)             # canzone su A1, lunga quanto il montaggio
+    for f, info in sorted((marks or {}).items()):
+        if 0 < f <= frames:                     # i marker restano anche nel montato
+            try:
+                new.AddMarker(f, info.get("color", "Blue"), info.get("name", ""),
+                              info.get("note", ""), 1)
+            except Exception:
+                pass
+    return ("Montaggio '%s' creato: %d stacchi su %.1fs, %s."
+            % (new.GetName(), ok, frames / tl_fps, fmt))
 
 
 def _tl_fps(tl):
@@ -655,12 +740,15 @@ win = disp.AddWindow({
             ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Make", "Text": "▶  Monta a tempo", "Weight": 4}),
+            ui.Button({"ID": "Mark", "Text": "◆  Marker sui beat", "Weight": 3}),
+            ui.Button({"ID": "Make", "Text": "▶  Monta", "Weight": 3}),
             ui.Button({"ID": "Close", "Text": "Chiudi", "Weight": 1}),
         ]),
 
         ui.TextEdit({"ID": "Log", "Weight": 1, "ReadOnly": True,
-                     "Text": "1) Seleziona clip + canzone  2) Analizza  3) Monta."}),
+                     "Text": "1) Seleziona clip + canzone  2) Analizza  "
+                             "3) Marker sui beat: controlli e sistemi i tagli (facoltativo)  "
+                             "4) Monta."}),
         ui.Label({"ID": "Status", "Text": "Pronto.", "Weight": 0, "WordWrap": True}),
     ]),
 ])
@@ -683,6 +771,7 @@ for o in ORDERS:
     itm["Ord"].AddItem(o)
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
+MARK_UID = None        # timeline dei marker creata con "Marker sui beat"
 
 
 def set_status(m):
@@ -709,7 +798,8 @@ def on_refresh(ev=None):
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPOS, BPM, INTENS
+    global SHOTS, BEATS, BPOS, BPM, INTENS, MARK_UID
+    MARK_UID = None                      # nuova analisi: i marker vecchi non valgono piu'
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -727,24 +817,73 @@ def on_analyze(ev):
     bars = sum(1 for p in BPOS if p == 0)
     set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
-            "Ora scegli stile/durata/formato/ordine e premi 'Monta a tempo'."
+            "Ora scegli stile/durata/formato/ordine. Premi 'Marker sui beat' per vedere "
+            "e sistemare i tagli sulla canzone, oppure direttamente 'Monta'."
             % (len(SHOTS), len(VIDEOS), "divise ai cambi scena" if split else "intere",
                BPM, len(BEATS), bars, MIN_CUT))
     set_status("Analisi ok: %d shot · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
-def on_make(ev):
-    if not SHOTS or not BEATS:
-        set_log("Prima premi 'Analizza'."); return
+def _dur():
     try:
-        dur = float((itm["Dur"].Text or "30").replace(",", "."))
+        return float((itm["Dur"].Text or "30").replace(",", "."))
     except ValueError:
-        dur = 30.0
+        return 30.0
+
+
+def on_mark(ev):
+    """Timeline con la canzone e i marker sui punti di stacco, da controllare."""
+    global MARK_UID
+    if not BEATS or not SONG:
+        set_log("Prima premi 'Analizza'."); return
+    style = itm["Style"].CurrentText
+    ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS)
+    if not ivs:
+        set_log("Nessun punto di stacco: controlla la canzone o la durata."); return
+    tl, n = marker_timeline(SONG, ivs, BEATS, BPOS, style.split()[0])
+    if tl is None:
+        set_log("Impossibile creare la timeline dei marker."); return
+    try:
+        MARK_UID = tl.GetUniqueId()
+    except Exception:
+        MARK_UID = tl.GetName()
+    set_log("TIMELINE '%s': canzone + %d marker (stile %s, %.0fs).\n\n"
+            "Ascoltala e sistema i tagli come vuoi:\n"
+            "• ROSSO = inizio battuta, CIANO = beat\n"
+            "• spostare: trascina il marker sul righello\n"
+            "• togliere: clic sul marker e Canc\n"
+            "• aggiungere: metti la testina dove vuoi e premi M\n"
+            "L'ultimo marker e' la FINE del montaggio.\n\n"
+            "Quando ti va bene premi 'Monta': mette una clip tra un marker e l'altro."
+            % (tl.GetName(), n, style.split()[0], _dur()))
+    set_status("Marker pronti: %d. Sistemali, poi 'Monta'." % n)
+
+
+def on_make(ev):
+    if not SHOTS or not SONG:
+        set_log("Prima premi 'Analizza'."); return
+    style = itm["Style"].CurrentText
+    marks = None
+    mk = find_timeline(MARK_UID) if MARK_UID else None
+    if mk is not None:                   # i marker (come li hai lasciati) comandano
+        cuts, marks = marker_cuts(mk)
+        if not cuts:
+            set_log("La timeline '%s' non ha marker: aggiungine col tasto M oppure "
+                    "ricreali con 'Marker sui beat'." % mk.GetName()); return
+        fps = _tl_fps(mk)
+        bounds = [0] + cuts
+        ivs = [(a / fps, b / fps) for a, b in zip(bounds, bounds[1:])]
+        tag, src = "marker", "dai %d marker di '%s'" % (len(cuts), mk.GetName())
+    else:
+        if not BEATS:
+            set_log("Prima premi 'Analizza'."); return
+        ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS)
+        tag, src = style.split()[0], "dai beat (stile %s)" % style.split()[0]
     set_status("Montaggio in corso…")
-    msg = montage(SHOTS, SONG, BEATS, BPOS, itm["Style"].CurrentText, dur,
-                  itm["Fmt"].CurrentText, ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
-                  bool(itm["Reuse"].Checked), INTENS, set_log)
-    set_log(msg)
+    msg = montage(SHOTS, SONG, ivs, tag, itm["Fmt"].CurrentText,
+                  ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
+                  bool(itm["Reuse"].Checked), set_log, marks)
+    set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg[:80])
 
 
@@ -754,6 +893,7 @@ def on_close(ev):
 
 win.On.Refresh.Clicked = on_refresh
 win.On.Analyze.Clicked = on_analyze
+win.On.Mark.Clicked = on_mark
 win.On.Make.Clicked = on_make
 win.On.Close.Clicked = on_close
 win.On.BeaTonicWin.Close = on_close
