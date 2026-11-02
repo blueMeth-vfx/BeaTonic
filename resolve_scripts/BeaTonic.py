@@ -211,19 +211,30 @@ def _clip_dur_sec(c):
         return 0.0
 
 
-def build_shots(videos, thresh, set_log):
-    """Spezza ogni clip ai cambi di scena -> lista di shot {clip,fps,in,out}."""
+MIN_SCENE = 1.5   # s: cambi scena piu' vicini di cosi' sono quasi sempre falsi
+                  # (movimento veloce, flash, luce che cambia) e vengono ignorati
+
+
+def build_shots(videos, thresh, split, set_log):
+    """Spezza ogni clip ai cambi di scena -> lista di shot {clip,fps,in,out}.
+    Con split=False ogni clip resta UNA shot intera (niente scene detection)."""
     shots = []
     for i, c in enumerate(videos, 1):
         path = c.GetClipProperty("File Path") or ""
         fps = _clip_fps(c)
         dur = _clip_dur_sec(c)
+        if not split or not path:
+            if dur > 0.1:
+                shots.append({"clip": c, "fps": fps, "in": 0.0, "out": dur})
+            continue
         set_log("Analisi scene %d/%d: %s…" % (i, len(videos), c.GetName()))
-        cuts = scene_cuts(path, thresh) if path else []
-        bounds = [0.0] + [t for t in cuts if 0.2 < t < dur - 0.1] + [dur]
+        bounds = [0.0]
+        for t in scene_cuts(path, thresh):
+            if t - bounds[-1] >= MIN_SCENE and dur - t >= MIN_SCENE:
+                bounds.append(t)
+        bounds.append(dur)
         for a, b in zip(bounds, bounds[1:]):
-            if b - a >= 0.4:   # scarta frammenti sotto 0.4s
-                shots.append({"clip": c, "fps": fps, "in": a, "out": b})
+            shots.append({"clip": c, "fps": fps, "in": a, "out": b})
     return shots
 
 
@@ -260,18 +271,36 @@ def _intervals(beats, style, dur, intens):
     return out
 
 
-def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, intens, set_log):
+ORDERS = {
+    "Ord: Nome A→Z": "nameaz",
+    "Ord: Nome Z→A": "nameza",
+    "Ord: Selezione": "selezione",
+    "Ord: Casuale (mischia tutto)": "casuale",
+}
+
+
+def order_shots(shots, mode):
+    """Ordine delle shot nel montaggio. Per nome: le shot dello stesso video restano
+    insieme e in ordine di tempo. Casuale: mischia le shot di TUTTI i video."""
+    tape = list(shots)
+    if mode == "casuale":
+        import random
+        random.shuffle(tape)
+    elif mode in ("nameaz", "nameza"):
+        tape.sort(key=lambda s: s["in"])                   # sort stabili: prima il tempo,
+        tape.sort(key=lambda s: (s["clip"].GetName() or "").lower(),
+                  reverse=(mode == "nameza"))              # poi il nome della clip
+    return tape                                            # "selezione": come selezionate
+
+
+def montage(shots, song, beats, style, dur, fmt, order_mode, reuse, intens, set_log):
     proj = resolve.GetProjectManager().GetCurrentProject()
     mp = proj.GetMediaPool()
     if not shots:
         return "Nessuna shot: analizza prima le clip."
     if not beats or len(beats) < 2:
         return "Beat non rilevati: controlla la canzone."
-    order = list(range(len(shots)))
-    if shuffle:
-        import random
-        random.shuffle(order)
-    tape = [shots[i] for i in order]
+    tape = order_shots(shots, order_mode)
 
     new = mp.CreateEmptyTimeline("BeatCut_%s" % style.split()[0])
     n = 2
@@ -292,31 +321,39 @@ def montage(shots, song, beats, style, dur, fmt, shuffle, reuse, intens, set_log
     ns = new.GetStartFrame()
 
     ivs = _intervals(beats, style, dur, intens)
-    # "tape" continuo: posizione globale su tape[ti] a partire da shot['in']
-    ti = [0]
-    pos = [tape[0]["in"]] if tape else [0.0]
+    # Una shot NUOVA a ogni stacco: si passa alla successiva dopo ogni pezzo, cosi'
+    # due stacchi di fila non mostrano mai la stessa clip. Se una shot e' piu' corta
+    # dello stacco, lo si completa con la shot dopo (resta sul beat). Si ripete solo
+    # dopo aver usato TUTTE le shot, e ogni riuso parte da dove si era arrivati nella
+    # clip (parti diverse, non la stessa inquadratura). 'reuse' spento = stop alla fine.
+    shot_i = [0]
+    read_pos = {}          # id(shot) -> secondi gia' usati di quella shot (in questo giro)
+    total = sum(max(0.0, s["out"] - s["in"]) for s in tape)
+    left = [total]         # materiale non ancora usato in questo giro
     exhausted = [False]
 
     def pull(length):
-        """Lista di (clip, fps, src_in, src_out) lunga ~length s, scorrendo il tape.
-        Se 'reuse' e' spento, si ferma quando il materiale finisce (niente ripetizioni)."""
+        """Lista di (clip, fps, src_in, src_out) lunga ~length s."""
         pieces = []
         need = length
         guard = 0
-        while need > 0.02 and guard < 10000:
+        while need > 0.02 and guard < 10000 and total > 0.02:
             guard += 1
-            sh = tape[ti[0] % len(tape)]
-            avail = sh["out"] - pos[0]
-            if avail <= 0.02:
-                ti[0] += 1
-                if not reuse and ti[0] >= len(tape):
+            if left[0] <= 0.02:                 # usato TUTTO il materiale
+                if not reuse:
                     exhausted[0] = True
                     break
-                pos[0] = tape[ti[0] % len(tape)]["in"]
+                read_pos.clear()                # riusa: nuovo giro completo
+                left[0] = total
+            sh = tape[shot_i[0] % len(tape)]
+            shot_i[0] += 1
+            start = sh["in"] + read_pos.get(id(sh), 0.0)
+            if sh["out"] - start <= 0.02:       # shot finita in questo giro: la prossima
                 continue
-            take = min(need, avail)
-            pieces.append((sh["clip"], sh["fps"], pos[0], pos[0] + take))
-            pos[0] += take
+            take = min(need, sh["out"] - start)
+            pieces.append((sh["clip"], sh["fps"], start, start + take))
+            read_pos[id(sh)] = start + take - sh["in"]
+            left[0] -= take
             need -= take
         return pieces
 
@@ -466,7 +503,7 @@ win = disp.AddWindow({
             ui.ComboBox({"ID": "Fmt", "Weight": 4}),
             ui.Label({"Text": "Durata s", "Weight": 1}),
             ui.LineEdit({"ID": "Dur", "PlaceholderText": "30", "Weight": 1}),
-            ui.CheckBox({"ID": "Shuffle", "Text": "casuale", "Weight": 2}),
+            ui.ComboBox({"ID": "Ord", "Weight": 5}),
             ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
         ]),
         ui.HGroup({"Weight": 0, "Spacing": 0}, [
@@ -487,12 +524,15 @@ try:
         itm["Logo"].IconSize = [58, 44]
 except Exception:
     pass
-for c in ["0.3 (media)", "0.2 (sensibile)", "0.4 (poco)", "0.5 (minima)"]:
+for c in ["0.4 (consigliata)", "0.3 (media)", "0.2 (sensibile)", "0.6 (minima)",
+          "Non dividere (clip intere)"]:
     itm["Sens"].AddItem(c)
 for s in STYLES:
     itm["Style"].AddItem(s)
 for f in FORMATS:
     itm["Fmt"].AddItem(f)
+for o in ORDERS:
+    itm["Ord"].AddItem(o)
 
 VIDEOS, SONG, SHOTS, BEATS, BPM, INTENS = [], None, [], [], 0.0, []
 
@@ -529,14 +569,17 @@ def on_analyze(ev):
         set_log("Nessuna clip video selezionata nel Media Pool."); return
     if not SONG:
         set_log("Nessuna canzone (clip audio) selezionata nel Media Pool."); return
-    sens = float((itm["Sens"].CurrentText or "0.3").split()[0])
+    sens_txt = itm["Sens"].CurrentText or "0.4"
+    split = not sens_txt.startswith("Non")
+    sens = float(sens_txt.split()[0]) if split else 0.4
     set_status("Analisi in corso (la finestra resta ferma)…")
-    SHOTS = build_shots(VIDEOS, sens, set_log)
+    SHOTS = build_shots(VIDEOS, sens, split, set_log)
     set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
-    set_log("ANALISI FATTA.\n• %d shot dalle clip (cambi scena).\n• Canzone: %.0f BPM, %d beat.\n\n"
-            "Ora scegli stile/durata/formato e premi 'Monta a tempo'."
-            % (len(SHOTS), BPM, len(BEATS)))
+    set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat.\n\n"
+            "Ora scegli stile/durata/formato/ordine e premi 'Monta a tempo'."
+            % (len(SHOTS), len(VIDEOS), "divise ai cambi scena" if split else "intere",
+               BPM, len(BEATS)))
     set_status("Analisi ok: %d shot · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
@@ -549,7 +592,7 @@ def on_make(ev):
         dur = 30.0
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, BEATS, itm["Style"].CurrentText, dur,
-                  itm["Fmt"].CurrentText, bool(itm["Shuffle"].Checked),
+                  itm["Fmt"].CurrentText, ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
                   bool(itm["Reuse"].Checked), INTENS, set_log)
     set_log(msg)
     set_status(msg[:80])

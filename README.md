@@ -71,11 +71,26 @@ condivisa con PlutoniCut.
 1. Nel **Media Pool** seleziona le **clip video** (le sorgenti) **+ la canzone**
    (una clip audio).
 2. **Aggiorna selezione** → controlla che veda N clip + la canzone.
-3. **Analizza**: ffmpeg trova i cambi di scena (sensibilità regolabile) e i beat.
+3. **Analizza**: ffmpeg trova i cambi di scena e i beat.
    *(È l'operazione lenta: la finestra resta ferma mentre lavora.)*
-4. Scegli **stile**, **formato**, **durata** e se vuoi l'**ordine casuale**. La
-   spunta **riusa clip** decide se riciclare le shot quando finiscono o fermarsi.
+   - **Sensibilità scene**: `0.4` è la consigliata; più bassa = divide di più.
+   - **Non dividere (clip intere)**: ogni video resta un pezzo unico, nessuna
+     scene detection (utile se il materiale è un piano unico o se divide troppo).
+4. Scegli **stile**, **formato**, **durata** e l'**ordine** delle clip:
+
+   | Ordine | Cosa fa |
+   |---|---|
+   | **Nome A→Z** / **Z→A** | segue il nome dei file; le shot dello stesso video restano in ordine di tempo |
+   | **Selezione** | l'ordine in cui hai selezionato le clip nel Media Pool |
+   | **Casuale** | mischia le shot di **tutti** i video |
+
+   La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
+   della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
 5. **Monta a tempo** → nasce la timeline con la canzone su A1 e le shot sui beat.
+
+**Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
+ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si
+ripete solo dopo aver usato **tutto** il materiale.
 
 | Stile | Taglio |
 |---|---|
@@ -93,6 +108,9 @@ condivisa con PlutoniCut.
 - **Beat**: non una griglia a BPM fisso (driftava sui brani a tempo variabile) ma
   *onset-driven* — flusso di energia + peak-picking adattivo con **gate sul silenzio**,
   così dove il brano sfuma non taglia.
+- **Scene**: i cambi scena più vicini di 1,5 s vengono ignorati (sono quasi sempre
+  falsi: movimento veloce, flash, luce che cambia), così lo stesso piano non viene
+  spezzato a caso.
 - Il beat detector è "buono", non da software musicale pro: dà il meglio sui brani ritmici.
 - Il verticale da sorgenti orizzontali ritaglia/adatta secondo le impostazioni di conforma.
 
