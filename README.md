@@ -74,39 +74,31 @@ applicazioni): ridimensionabile, sempre reattiva anche mentre analizza o monta, 
 l'avanzamento in diretta. Gira solo sul tuo computer; chiudendo le finestre di BeaTonic
 il plugin si chiude da solo. Le impostazioni vengono ricordate.
 
-Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
+- **📌 Sempre davanti** (acceso di base): le finestre di BeaTonic restano davanti a
+  Resolve anche quando clicchi nel Media Pool o nella timeline. L'editor dei marker,
+  appena si apre, va sopra il pannello.
+- Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**. L'editor dei
+  marker ha **lo stesso aspetto** del pannello e lo cambia insieme a lui.
 
 | Studio | Labs | Notte |
 |---|---|---|
 | ![Studio](docs/pannello_studio.png) | ![Labs](docs/pannello_labs.png) | ![Notte](docs/pannello_notte.png) |
 
-1. Nel **Media Pool** seleziona le **clip video** (le sorgenti) **+ la canzone**
-   (una clip audio).
-2. **Aggiorna selezione** → controlla che veda N clip + la canzone.
-3. **Analizza**: ffmpeg trova i cambi di scena e i beat. Clip e canzoni già analizzate
-   restano in memoria: rifare Analizza è istantaneo (rianalizza solo le novità).
-   *(La prima volta è l'operazione più lunga: il pannello mostra l'avanzamento.)*
-   - Le clip vengono divise sia agli **stacchi** veri sia ai **cambi d'inquadratura**
-     dentro una ripresa continua (la camera si sposta su un altro soggetto).
-   - **Sensibilità scene**: *Media* è la consigliata; *Alta* trova più divisioni;
-     *Bassa* tiene solo gli stacchi e i cambi più netti.
-   - **Non dividere (clip intere)**: ogni video resta un pezzo unico.
-4. **Proposte di montaggio**: appena analizzato, BeaTonic propone **tre montaggi diversi**
-   della stessa canzone, con una striscia che mostra dove cadono i tagli:
+Prima **imposti tutto**, poi **Analizza**: BeaTonic ti prepara subito le opzioni di
+montato con i tuoi parametri.
 
-   | Proposta | Taglio | Clip |
-   |---|---|---|
-   | **Energia** | ogni beat dove la canzone spinge, mezza battuta altrove | mischiate |
-   | **Groove** | sull'1 e sul 3 della battuta, ogni beat solo nei punti più forti | in ordine di nome |
-   | **Cinematico** | un'inquadratura per battuta, due nelle parti calme | in ordine di selezione |
-
-   Per ognuna: **Apri nell'editor** (per ritoccarla, poi Monta) o **Monta questa**.
-   **Monta tutte e 3** crea tre timeline (`BeaTonic_Energia`, `_Groove`, `_Cinematico`)
-   da confrontare in Resolve.
-
-   ![Proposte di montaggio](docs/proposte_notte.png)
-
-   **Oppure personalizza**: scegli **stile**, **formato**, **durata** e l'**ordine** delle clip:
+1. **Materiale**: nel **Media Pool** seleziona le **clip video** (le sorgenti) **+ la
+   canzone** (una clip audio), poi **Aggiorna selezione**.
+2. **Durata e canzone**:
+   - **Durata del montaggio** in secondi, oppure **Canzone intera** (il montaggio dura
+     quanto la canzone).
+   - **Adatta la canzone alla durata** *(interruttore)*: acceso, all'analisi la canzone
+     viene accorciata o allungata alla durata scelta, come l'AI Music Editor di Resolve
+     (vedi sotto); spento, si usa l'originale e il montaggio si ferma sul "1" della
+     battuta più vicino alla durata.
+3. **Ritmo, formato e clip**: **il tuo ritmo** (Veloce / Medio / Lento / Dinamico),
+   **formato** 16:9 o 9:16, **ordine** delle clip, **sensibilità scene** e **riusa le
+   clip** (acceso = se il materiale finisce prima ricomincia un giro, spento = si ferma lì).
 
    | Ordine | Cosa fa |
    |---|---|
@@ -114,30 +106,48 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
    | **Selezione** | l'ordine in cui hai selezionato le clip nel Media Pool |
    | **Casuale** | mischia le shot di **tutti** i video |
 
-   La spunta **riusa clip** decide cosa fare quando il materiale finisce prima
-   della durata scelta: acceso = ricomincia un nuovo giro, spento = si ferma lì.
-5. **♪ Adatta canzone** *(facoltativo)* → adatta la canzone alla **durata** scelta, come
-   l'AI Music Editor di Resolve (che i plugin non possono usare): resta **la stessa
-   canzone**, con l'**inizio e il finale veri**, solo più corta o più lunga.
-   - Toglie (o ripete, se va allungata) **battute intere** dove la musica "suona
-     uguale": stesso accordo, stesso timbro, stessa posizione nella frase. Prova uno e
-     due salti e sceglie quelli che si sentono meno.
-   - Sul salto: taglio quasi invisibile (60 ms) se i due punti si somigliano, altrimenti
-     una dissolvenza **a tempo** di 1–2 beat, allineata sul "1" della battuta.
-   - Durata esatta con una correzione di tempo di al massimo il 2,5% (non si sente).
-   - Crea `<canzone> - BeaTonic 30s.wav` accanto all'originale, lo importa nel Media
-     Pool e lo usa da subito per Marker e Monta. Nel log: cosa ha tolto o ripetuto e
-     quanto si somigliano i punti di salto.
-   - Le **clip già analizzate restano**: la canzone in uso diventa quella adattata e ci
-     rimane anche se rifai Analizza o Aggiorna selezione (finché non selezioni
-     un'altra canzone). **↺ usa l'originale** torna indietro; riadattando a un'altra
-     durata si riparte sempre dall'originale.
-   - Per confrontare l'**armonia** serve `numpy` nel Python che usa Resolve (di solito
-     c'è); senza, confronta solo ritmo ed energia ed è meno preciso.
-6. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker** in una
+   - **Sensibilità scene**: le clip vengono divise sia agli **stacchi** veri sia ai
+     **cambi d'inquadratura** dentro una ripresa continua. *Media* è la consigliata,
+     *Alta* trova più divisioni, *Bassa* tiene solo i cambi più netti, *Non dividere*
+     lascia ogni video intero.
+4. **Analizza**: ffmpeg trova i cambi di scena e i beat e, se l'hai chiesto, adatta la
+   canzone. Clip e canzoni già analizzate restano in memoria: rifare Analizza è
+   istantaneo. Se dopo l'analisi cambi durata o "adatta", il pannello ti avvisa di
+   premere di nuovo Analizza (le clip non vengono rianalizzate).
+5. **Scegli il montaggio**: quattro opzioni già pronte, **tutte con la durata, il formato,
+   l'ordine e "riusa" che hai scelto**, con una striscia che mostra dove cadono i tagli:
+
+   | Opzione | Taglio |
+   |---|---|
+   | **Il tuo** | il ritmo che hai scelto (o i tuoi marker, se li hai sistemati nell'editor) |
+   | **Energia** | ogni beat dove la canzone spinge, mezza battuta altrove: ritmo serrato |
+   | **Groove** | sull'1 e sul 3 della battuta, ogni beat solo nei punti più forti |
+   | **Cinematico** | un'inquadratura per battuta, due nelle parti calme |
+
+   Per ognuna: **◆ Apri nell'editor** (per ritoccarla) o **▶ Monta**. **Monta le 3
+   proposte** crea tre timeline da confrontare in Resolve.
+   **Nome della timeline**: scrivi come chiamarla (vuoto = automatico, es.
+   `BeaTonic_Groove`; con "Monta le 3" diventa `<nome> Energia`, `<nome> Groove`...).
+
+**♪ Adatta la canzone alla durata**, nel dettaglio: resta **la stessa canzone**, con
+l'**inizio e il finale veri**, solo più corta o più lunga.
+- Toglie (o ripete, se va allungata) **battute intere** dove la musica "suona uguale":
+  stesso accordo, stesso timbro, stessa posizione nella frase. Prova uno e due salti e
+  sceglie quelli che si sentono meno.
+- Sul salto: taglio quasi invisibile (60 ms) se i due punti si somigliano, altrimenti una
+  dissolvenza **a tempo** di 1–2 beat, allineata sul "1" della battuta.
+- Durata esatta con una correzione di tempo di al massimo il 2,5% (non si sente).
+- Crea `<canzone> - BeaTonic 30s.wav` accanto all'originale e lo importa nel Media Pool.
+  Nel log: cosa ha tolto o ripetuto e quanto si somigliano i punti di salto. Si riparte
+  sempre dall'originale; spegnendo l'interruttore (o scegliendo "canzone intera") e
+  rifacendo Analizza torna l'originale.
+- Per confrontare l'**armonia** serve `numpy` nel Python che usa Resolve (di solito c'è);
+  senza, confronta solo ritmo ed energia ed è meno preciso.
+
+**◆ Editor dei marker** (da **Apri nell'editor**) → si apre in una
    finestra a parte (Chrome o Edge in modalità app, ridimensionabile e a schermo intero):
    la canzone con la forma d'onda come in una timeline, **un solo tipo di marker — ogni
-   marker è un cambio clip** — partendo dai punti di taglio dello stile scelto.
+   marker è un cambio clip** — partendo dai tagli dell'opzione che hai aperto.
    **Cambiando stile o durata nell'editor i marker si rifanno subito** (Ctrl+Z per tornare).
 
    **Anteprima del montato** (riquadro a destra, `P`): di base **bianco / nero** che si alterna a ogni
@@ -176,9 +186,10 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
    L'ultimo marker è la **fine** del montaggio.
 
    ![Editor dei marker di BeaTonic](docs/editor_marker.jpg)
-7. **▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
+**▶ Monta** → nasce la timeline montata: la canzone su A1 e **una clip tra un marker
    e l'altro**, esattamente sui fotogrammi dei marker (le stesse clip dell'anteprima).
-   Se hai saltato l'editor, taglia direttamente sui beat dello stile scelto. Nel log trovi il **riepilogo**:
+   Dopo l'editor, l'opzione **Il tuo** diventa **I tuoi marker**; cambiando ritmo o durata nel
+   pannello torna a seguire i beat. Nel log trovi il **riepilogo**:
    quanto materiale c'è e se è stato necessario ripetere qualche pezzo (e perché).
 
 > Puoi riaprire l'editor, ritoccare i marker e premere **Monta** quante volte vuoi:

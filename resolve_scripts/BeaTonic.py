@@ -538,13 +538,13 @@ def _intervals(beats, bpos, style, dur, intens, song_len=0.0):
     return list(zip(bounds, bounds[1:]))
 
 
-PRESETS = [   # (chiave, nome, descrizione, ordine delle clip): tre montaggi diversi tra loro
+PRESETS = [   # (chiave, nome, descrizione): tre tipi di taglio diversi tra loro
     ("energia", "Energia", "Un taglio a ogni beat dove la canzone spinge, a mezza battuta altrove: "
-     "ritmo serrato, clip mischiate.", "Ord: Casuale (mischia tutto)"),
+     "ritmo serrato."),
     ("groove", "Groove", "Tagli sull'1 e sul 3 della battuta, ogni beat solo nei punti più forti: "
-     "segue il ballo, clip in sequenza.", "Ord: Nome A→Z"),
+     "segue il ballo."),
     ("cinema", "Cinematico", "Un'inquadratura per battuta, due battute nelle parti calme: "
-     "lascia respirare le immagini.", "Ord: Selezione"),
+     "lascia respirare le immagini."),
 ]
 
 ORDERS = {
@@ -605,38 +605,63 @@ EDITOR_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <title>BeaTonic · Marker</title>
 <link rel="icon" id="fav" href="/logo">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Rubik+Mono+One&family=Space+Grotesk:wght@500;600;700&display=swap">
 <style>
-:root {
-  --bg: #0f1115; --panel: #111827; --ruler: #0b0d11; --line: #1f2937; --fg: #e5e7eb;
-  --muted: #9ca3af; --accent: #7c3aed; --accent2: #a78bfa; --wave: #7467d6; --beat: #171b27;
-  --bar: #272e44; --mark: #a78bfa; --sel: #ffffff; --head: #f59e0b; --hover: #ffffff;
-  --dim: rgba(0, 0, 0, .45); --btn: #1f2937; --btnh: #374151; --onfg: #ffffff;
-  --font: "Segoe UI", Inter, system-ui, sans-serif;
+/* stessi tre aspetti del pannello di BeaTonic; --wave, --mark... servono alla tela */
+body.look-studio {
+  --bg: #0a0a12; --panel: #13111f; --ruler: #0d0b18; --line: #2a2640; --fg: #ece9fb;
+  --muted: #a39fc0; --accent: #8b5cf6; --accent2: #c4b5fd; --wave: #8b7cf0; --beat: #14121f;
+  --bar: #2c2747; --mark: #e9d5ff; --sel: #ffffff; --head: #f0abfc; --hover: #ffffff;
+  --dim: rgba(0, 0, 0, .45); --btn: rgba(255,255,255,.07); --btnh: rgba(255,255,255,.12); --onfg: #ffffff;
+  --accent-bg: linear-gradient(135deg, #7c3aed, #c026d3); --onshadow: 0 6px 18px rgba(124,58,237,.4);
+  --titlebg: linear-gradient(90deg, #fff, #c4b5fd 60%, #f0abfc); --titlefont: 800 19px "Inter", "Segoe UI", sans-serif;
+  --bd: 1px solid rgba(255,255,255,.09); --r: 9px; --logofx: drop-shadow(0 4px 12px rgba(192,38,211,.45));
+  --font: "Inter", "Segoe UI", system-ui, sans-serif;
+  --topbg: linear-gradient(90deg, rgba(124,58,237,.18), rgba(192,38,211,.08) 60%, transparent), #13111f;
 }
-body.labs {
+body.look-labs {
   --bg: #F3F0F7; --panel: #FBF4FF; --ruler: #FBF4FF; --line: #0E0418; --fg: #0E0418;
   --muted: #4B4458; --accent: #EE3A5B; --accent2: #B0126E; --wave: #A58FC4; --beat: #ECE3F5;
   --bar: #D8C8EA; --mark: #EE3A5B; --sel: #0E0418; --head: #F7A541; --hover: #0E0418;
-  --dim: rgba(14, 4, 24, .08); --btn: #FBF4FF; --btnh: #EDE3F7; --onfg: #0E0418;
-  --font: "Public Sans", "Segoe UI", system-ui, sans-serif;
+  --dim: rgba(14, 4, 24, .08); --btn: #ffffff; --btnh: #F4F07C; --onfg: #0E0418;
+  --accent-bg: linear-gradient(90deg, #F4F07C, #F7A541 45%, #EE3A5B); --onshadow: 3px 3px 0 #0E0418;
+  --titlebg: linear-gradient(180deg, #F7A541, #EE3A5B 55%, #B0126E); --titlefont: 400 18px "Rubik Mono One", "Impact", sans-serif;
+  --bd: 2px solid #0E0418; --r: 7px; --logofx: none;
+  --font: "Inter", "Public Sans", "Segoe UI", sans-serif; --topbg: #FBF4FF;
+}
+body.look-notte {
+  --bg: #12071F; --panel: #1a0b2e; --ruler: #160926; --line: #3d1f5c; --fg: #fbefff;
+  --muted: #c9b3df; --accent: #EE3A5B; --accent2: #F7A541; --wave: #F2716B; --beat: #1b0c31;
+  --bar: #3a1a5e; --mark: #F4F07C; --sel: #ffffff; --head: #F7A541; --hover: #ffffff;
+  --dim: rgba(0, 0, 0, .45); --btn: rgba(255,255,255,.06); --btnh: rgba(238,58,91,.2); --onfg: #12071F;
+  --accent-bg: linear-gradient(90deg, #F4F07C, #F7A541 30%, #EE3A5B 65%, #B0126E); --onshadow: 0 0 18px rgba(238,58,91,.45);
+  --titlebg: linear-gradient(180deg, #F4F07C, #F7A541 35%, #EE3A5B 65%, #B0126E); --titlefont: 400 18px "Rubik Mono One", "Impact", sans-serif;
+  --bd: 1px solid rgba(247,165,65,.28); --r: 9px; --logofx: drop-shadow(0 0 12px rgba(247,165,65,.55));
+  --font: "Space Grotesk", "Inter", "Segoe UI", sans-serif;
+  --topbg: linear-gradient(180deg, #1d0b36, #12071F);
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
   font: 13px var(--font); overflow: hidden; user-select: none; -webkit-user-select: none; }
 #app { display: flex; flex-direction: column; height: 100%; }
-#top { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--panel);
-  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-#logo { height: 30px; }
-#title { font-weight: 800; font-size: 16px; color: var(--accent2); }
+#top { display: flex; align-items: center; gap: 6px; padding: 9px 12px; background: var(--topbg);
+  border-bottom: var(--bd); flex-wrap: wrap; }
+#logo { height: 32px; filter: var(--logofx); }
+#title { font: var(--titlefont); background: var(--titlebg); -webkit-background-clip: text; background-clip: text;
+  color: transparent; padding-right: 2px; }
 #song { color: var(--muted); margin-right: auto; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 26vw; padding-left: 6px; }
-button, select, input { font: inherit; color: var(--fg); background: var(--btn);
-  border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; outline: none; }
-body.labs button, body.labs select, body.labs input { border-width: 2px; }
-button { cursor: pointer; white-space: nowrap; }
+button, select, input { font: inherit; font-weight: 600; color: var(--fg); background: var(--btn);
+  border: var(--bd); border-radius: var(--r); padding: 6px 11px; outline: none; }
+select option { background: var(--panel); color: var(--fg); }
+button { cursor: pointer; white-space: nowrap; transition: background .15s, transform .1s; }
 button:hover { background: var(--btnh); }
-button.on { background: var(--accent); border-color: var(--accent); color: var(--onfg); }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--onfg); font-weight: 700; }
+button.on, button.primary { background: var(--accent-bg); color: var(--onfg); box-shadow: var(--onshadow); }
+button.primary { font-weight: 800; }
+body.look-labs button { box-shadow: 3px 3px 0 #0E0418; }
+body.look-labs button:active { transform: translate(3px, 3px); box-shadow: none; }
+body.look-labs button.on, body.look-labs button.primary { box-shadow: 3px 3px 0 #0E0418; }
 input[type=number] { width: 62px; }
 .sep { width: 1px; height: 24px; background: var(--line); margin: 0 3px; opacity: .6; }
 #ov { display: block; width: 100%; height: 58px; cursor: pointer; border-bottom: 1px solid var(--line); }
@@ -644,30 +669,32 @@ input[type=number] { width: 62px; }
 #cv { flex: 1; position: relative; min-width: 0; }
 #main { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; cursor: grab; }
 #prev { width: clamp(220px, 27vw, 440px); display: flex; flex-direction: column; gap: 8px; padding: 10px;
-  background: var(--panel); border-left: 1px solid var(--line); }
+  background: var(--panel); border-left: var(--bd); }
 #prev[hidden] { display: none; }
 #prevHead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-#prevHead b { color: var(--accent2); }
+#prevHead b { font: var(--titlefont); font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+  background: var(--titlebg); -webkit-background-clip: text; background-clip: text; color: transparent; }
 #prevBox { flex: 1; position: relative; min-height: 0; }
 #pv { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
 #prevInfo { color: var(--muted); min-height: 2.6em; line-height: 1.3; font-variant-numeric: tabular-nums; }
 #status { display: flex; gap: 16px; padding: 6px 12px; background: var(--panel);
-  border-top: 1px solid var(--line); color: var(--muted); flex-wrap: wrap; align-items: center; }
+  border-top: var(--bd); color: var(--muted); flex-wrap: wrap; align-items: center; }
 #status b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
 #hint { margin-left: auto; opacity: .85; }
 .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
   background: rgba(0, 0, 0, .55); z-index: 10; }
 .overlay[hidden] { display: none; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+.card { background: var(--panel); border: var(--bd); border-radius: 12px;
   padding: 22px 26px; max-width: 680px; line-height: 1.55; }
-.card h2 { margin: 0 0 10px; color: var(--accent2); }
+.card h2 { margin: 0 0 10px; font: var(--titlefont); background: var(--titlebg); -webkit-background-clip: text;
+  background-clip: text; color: transparent; }
 .card .row { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px;
   font: 12px ui-monospace, Consolas, monospace; background: var(--ruler); }
 td { padding: 3px 14px 3px 0; vertical-align: top; }
 </style>
 </head>
-<body>
+<body class="look-studio">
 <div id="app">
   <div id="top">
     <img id="logo" alt="" hidden>
@@ -1419,8 +1446,7 @@ function frame(now) {
 async function boot() {
   try { S = await (await fetch("/session", {cache: "no-store"})).json(); }
   catch (e) { $("startMsg").textContent = "Non trovo la sessione: riapri l'editor da BeaTonic."; return; }
-  document.body.classList.toggle("labs", S.theme === "labs");
-  readColors();
+  setLook(S.theme);
   $("song").textContent = S.song_name || "";
   if (S.logo) { $("logo").src = "/logo"; $("logo").hidden = false; }
   for (const st of S.styles) {
@@ -1455,7 +1481,16 @@ async function boot() {
   requestAnimationFrame(frame);
 }
 boot();
-setInterval(() => fetch("/api/ping").catch(() => {}), 4000);   // "sono aperto": BeaTonic resta vivo
+function setLook(l) {                         // stesso aspetto del pannello (Studio / Labs / Notte)
+  if (!["studio", "labs", "notte"].includes(l) || document.body.dataset.look === l) return;
+  document.body.className = "look-" + l;
+  document.body.dataset.look = l;
+  readColors();
+  if (typeof buf !== "undefined" && buf) try { renderOvImg(); } catch (e) {}   // anche la panoramica
+  dirty = true;
+  try { drawPreview(); } catch (e) {}
+}
+setInterval(() => fetch("/api/ping").then(r => r.text()).then(setLook).catch(() => {}), 1500);   // "sono aperto" + aspetto
 (function favicon() {                         // logo Plutonic quadrato: icona della finestra e della barra
   const im = new Image();
   im.onload = () => {
@@ -1539,7 +1574,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif p == "/api/state":
                 self._send(json.dumps(_state()).encode("utf-8"))
             elif p == "/api/ping":
-                self._send(b"ok", "text/plain")
+                self._send(SET["look"].encode("utf-8"), "text/plain")   # l'editor segue l'aspetto
             elif p == "/session":
                 self._send(json.dumps(SESS).encode("utf-8"))
             elif p == "/song":
@@ -1627,6 +1662,72 @@ def _open_window(url, size=(1500, 880)):
     return webbrowser.open(url)
 
 
+TITLES = ("BeaTonic", "BeaTonic · Marker")   # titoli delle finestre (pannello, editor)
+
+
+def _app_windows(title):
+    """Finestre di Chrome/Edge visibili con quel titolo (solo Windows)."""
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    found = []
+
+    def cb(h, _l):
+        n = u.GetWindowTextLengthW(h)
+        if n and u.IsWindowVisible(h):
+            b = ctypes.create_unicode_buffer(n + 1)
+            u.GetWindowTextW(h, b, n + 1)
+            if b.value == title:
+                c = ctypes.create_unicode_buffer(64)
+                u.GetClassNameW(h, c, 64)
+                if c.value.startswith("Chrome_WidgetWin"):
+                    found.append(h)
+        return True
+    u.EnumWindows(ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(cb), 0)
+    return found
+
+
+def _pin_windows(titles, on, front=False):
+    """Tiene le finestre del plugin SEMPRE DAVANTI (anche quando clicchi in Resolve).
+    Tocca solo le finestre che non lo sono gia' (cosi' non rimescola l'ordine);
+    front=True le porta comunque in cima, nell'ordine di 'titles' (l'ultima sopra)."""
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        flags = 0x0001 | 0x0002 | 0x0010          # niente spostamenti, non ruba il fuoco
+        n = 0
+        for title in titles:
+            for h in _app_windows(title):
+                top = bool(u.GetWindowLongW(h, -20) & 0x8)   # WS_EX_TOPMOST
+                if on and (front or not top):
+                    u.SetWindowPos(h, wintypes.HWND(-1), 0, 0, 0, 0, flags)
+                elif not on and front:             # in cima una volta sola, poi normale
+                    u.SetWindowPos(h, wintypes.HWND(-1), 0, 0, 0, 0, flags)
+                    u.SetWindowPos(h, wintypes.HWND(-2), 0, 0, 0, 0, flags)
+                elif not on and top:
+                    u.SetWindowPos(h, wintypes.HWND(-2), 0, 0, 0, 0, flags)
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def _bring_front(title, on, wait=10.0):
+    """Appena la finestra appare, la porta sopra le altre del plugin (in un thread)."""
+    def run():
+        end = time.time() + wait
+        while time.time() < end:
+            if _pin_windows((title,), on, front=True):
+                return
+            time.sleep(0.2)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def _preview_data(tape):
     """Clip e sequenza delle shot (nell'ordine del montaggio) per l'anteprima nell'editor.
     Per ogni clip: dati del mosaico di miniature (al massimo ~300 per clip)."""
@@ -1659,7 +1760,7 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
             "beats": beats, "bpos": bpos, "intens": intens, "bpm": bpm, "marks": marks,
             "fps": fps, "theme": theme, "style": style, "dur": dur, "min_cut": MIN_CUT,
             "styles": [[k, v] for k, v in STYLES.items()] +
-                      [["Proposta " + name, key] for key, name, _d, _o in PRESETS],
+                      [["Proposta " + name, key] for key, name, _d in PRESETS],
             "logo": _LOGO if os.path.exists(_LOGO) else ""}
     sess["clips"], sess["tape"] = _preview_data(tape)
     sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG)
@@ -1671,6 +1772,7 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
     SESS.update(sess)
     url = _url("editor?s=%s" % SESSION[0])
     _open_window(url, (1500, 880))
+    _bring_front(TITLES[1], SET["ontop"])
     return True, url
 
 
@@ -1686,7 +1788,7 @@ def editor_marks():
     return sorted(float(t) for t in d.get("marks", []) if float(t) > 0)
 
 
-def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None):
+def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, name=None):
     """Monta le shot negli intervalli ivs [(inizio s, fine s), ...] che partono da 0.
     Ogni stacco cade ESATTAMENTE sul suo fotogramma: dopo ogni clip si legge dove e'
     finita davvero e la successiva si calcola per arrivare al punto dopo (nessuno
@@ -1699,7 +1801,7 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None):
         return "Nessun punto di stacco."
     tape = order_shots(shots, order_mode, seed)
 
-    new = _new_timeline(mp, "BeaTonic_%s" % tag)
+    new = _new_timeline(mp, name or "BeaTonic_%s" % tag)   # nome scelto, o automatico
     if new is None:
         return "Impossibile creare la timeline."
     W, H = FORMATS.get(fmt, (1920, 1080))
@@ -2101,12 +2203,14 @@ def save_theme(name):
 
 
 SET = {"sens": "Media (consigliata)", "style": list(STYLES)[0], "fmt": list(FORMATS)[0],
-       "ord": list(ORDERS)[0], "dur": 30.0, "reuse": True, "look": load_theme()}
+       "ord": list(ORDERS)[0], "dur": 30.0, "reuse": True, "look": load_theme(),
+       "tlname": "", "ontop": True, "full": False, "fit": False}
 _CHOICES = {"sens": SENS, "style": STYLES, "fmt": FORMATS, "ord": ORDERS}
 
 
 def _apply_settings(d, save=True):
     """Impostazioni dalla finestra (validate) e ricordate per la prossima volta."""
+    before = (SET["style"], SET["dur"], SET["full"])
     for k, opts in _CHOICES.items():
         if d.get(k) in opts:
             SET[k] = d[k]
@@ -2115,11 +2219,20 @@ def _apply_settings(d, save=True):
             SET["dur"] = float(d["dur"])
     except (TypeError, ValueError):
         pass
-    if "reuse" in d:
-        SET["reuse"] = bool(d["reuse"])
+    for k in ("reuse", "full", "fit"):     # full = canzone intera; fit = adatta la canzone
+        if k in d:
+            SET[k] = bool(d[k])
+    if isinstance(d.get("tlname"), str):          # nome della timeline ("" = automatico)
+        SET["tlname"] = re.sub(r'[\\/:*?"<>|]', "", d["tlname"]).strip()[:80]
+    if "ontop" in d and bool(d["ontop"]) != SET["ontop"]:
+        SET["ontop"] = bool(d["ontop"])
+        _pin_windows(TITLES, SET["ontop"])
     if d.get("look") in LOOKS and d["look"] != SET["look"]:
         SET["look"] = d["look"]
         save_theme("labs" if SET["look"] == "labs" else "studio")
+    if save and before != (SET["style"], SET["dur"], SET["full"]) and (MARKS or editor_marks()):
+        MARKS[:] = []                    # il tuo montaggio segue il nuovo ritmo / la nuova durata
+        SESSION[0] = "%x" % int(time.time() * 1000)
     if save:
         try:
             os.makedirs(os.path.dirname(_SET_FILE), exist_ok=True)
@@ -2214,7 +2327,8 @@ def _state():
             "info": {"analyzed": bool(BEATS and SHOTS), "shots": len(SHOTS), "bpm": BPM,
                      "beats": len(BEATS), "bars": sum(1 for p in BPOS if p == 0),
                      "song_len": SONG_LEN[0], "fitted": bool(FITTED),
-                     "orig": FITTED.get("orig_name", ""),
+                     "orig": FITTED.get("orig_name", ""), "stale": _song_stale(),
+                     "dur": _dur(),
                      "marks": len(saved) if saved is not None else len(MARKS)}}
 
 
@@ -2259,21 +2373,40 @@ def on_analyze(ev):
     if not BEATS:
         set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
         _use_song(SONG, analyze=True)
+    fit_log = ""
+    if _song_stale():
+        if SET["fit"] and not SET["full"]:
+            on_fit(None)                 # adatta la canzone alla durata (parte dall'originale)
+            fit_log = "\n\n" + STATE["log"]
+        else:
+            on_unfit(None)               # canzone intera / non adattata: l'originale
     bars = sum(1 for p in BPOS if p == 0)
     reused = len(VIDEOS) - len(todo)
     set_log("ANALISI FATTA.\n• %d pezzi video da %d clip (%s)%s.\n• Canzone%s: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
-            "Ora scegli stile, formato, durata e ordine. Puoi adattare la canzone alla durata "
-            "e aprire l'editor dei marker, oppure premere direttamente 'Monta'."
+            "Le opzioni di montato sono pronte qui sopra, con le tue impostazioni: "
+            "aprile nell'editor per ritoccarle o montale."
             % (len(SHOTS), len(VIDEOS),
                ("%d stacchi + %d cambi d'inquadratura" % (n_cut, n_ref)) if split else "intere",
                (" — %d già analizzate, riusate" % reused) if reused else "",
-               " adattata" if FITTED else "", BPM, len(BEATS), bars, MIN_CUT))
+               " adattata" if FITTED else "", BPM, len(BEATS), bars, MIN_CUT) + fit_log)
     set_status("Analisi ok: %d pezzi video · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
 def _dur():
+    """Durata del montaggio: quella scelta, o tutta la canzone."""
+    if SET["full"] and SONG_LEN[0] > 0:
+        return SONG_LEN[0]
     return float(SET["dur"]) if SET["dur"] > 0 else 30.0
+
+
+def _song_stale():
+    """La canzone in uso non corrisponde alle impostazioni (serve 'Analizza')."""
+    if not BEATS:
+        return False
+    if SET["fit"] and not SET["full"]:
+        return not FITTED or abs(SONG_LEN[0] - float(SET["dur"])) > 0.05
+    return bool(FITTED)
 
 
 def _proj_fps():
@@ -2305,7 +2438,7 @@ def on_mark(ev):
     W, H = FORMATS.get(SET["fmt"], (1920, 1080))
     style = ev if isinstance(ev, str) else SET["style"]   # una proposta apre col suo taglio
     ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
-                           style, _dur(), "labs" if SET["look"] == "labs" else "studio",
+                           style, _dur(), SET["look"],
                            tape=_tape(), reuse=SET["reuse"], aspect=W / float(H))
     if not ok:
         set_log(info); set_status(info); return
@@ -2396,17 +2529,26 @@ def preset_ivs(key):
 
 
 def _presets_info():
-    """Le tre proposte per la finestra: tagli, quanti stacchi, durata media."""
+    """Le opzioni di montato per la finestra: prima il TUO (ritmo scelto o i marker
+    dell'editor), poi le tre proposte. Tutte con durata, formato e ordine scelti."""
     if not (BEATS and SHOTS) or STATE["busy"] in ("analyze", "fit", "unfit", "refresh"):
         return []                        # (l'analisi cambia mentre la si legge)
-    out = []
-    for key, name, desc, ordk in PRESETS:
-        ivs = preset_ivs(key)
-        L = [b - a for a, b in ivs]
-        out.append({"key": key, "name": name, "desc": desc, "ord": ordk.replace("Ord: ", ""),
-                    "marks": [round(b, 3) for _, b in ivs],
-                    "n": len(L), "avg": sum(L) / len(L) if L else 0.0})
+    saved = editor_marks()
+    if saved:
+        out = [_opt("mine", "I tuoi marker", "Il montaggio come l'hai sistemato nell'editor "
+                    "(%d marker)." % len(saved), list(zip([0.0] + saved, saved)))]
+    else:
+        st, sub = (SET["style"].rstrip(")").split(" (") + [""])[:2]
+        out = [_opt("mine", st, "Il ritmo che hai scelto: %s." % sub, preset_ivs(SET["style"]))]
+    for key, name, desc in PRESETS:
+        out.append(_opt(key, name, desc, preset_ivs(key)))
     return out
+
+
+def _opt(key, name, desc, ivs):
+    L = [b - a for a, b in ivs]
+    return {"key": key, "name": name, "desc": desc, "marks": [round(b, 3) for _, b in ivs],
+            "n": len(L), "avg": sum(L) / len(L) if L else 0.0}
 
 
 def _save_marks(marks):
@@ -2422,10 +2564,11 @@ def _save_marks(marks):
 
 def on_preset_edit(key):
     """Apre la proposta nell'editor dei marker, per ritoccarla."""
+    if key == "mine":
+        return on_mark(None)
     p = _preset(key)
     if not p or not BEATS:
         set_log("Prima premi 'Analizza'."); return
-    SET["ord"] = p[3]                    # l'anteprima e il montaggio usano il suo ordine
     SESSION[0] = "%x" % int(time.time() * 1000)   # un editor gia' aperto non la sovrascrive
     _save_marks([b for _, b in preset_ivs(key)])
     on_mark("Proposta " + p[1])
@@ -2434,11 +2577,13 @@ def on_preset_edit(key):
 
 def on_preset_make(key):
     """Monta direttamente la proposta."""
+    if key == "mine":
+        return on_make(None)
     p = _preset(key)
     if not p or not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
-    msg = montage(SHOTS, SONG, preset_ivs(key), p[1], SET["fmt"], ORDERS[p[3]],
-                  SET["reuse"], set_log, SEED[0])
+    msg = montage(SHOTS, SONG, preset_ivs(key), p[1], SET["fmt"], ORDERS[SET["ord"]],
+                  SET["reuse"], set_log, SEED[0], name=SET["tlname"] or None)
     set_log("%s\nProposta «%s»: %s" % (msg, p[1], p[2]))
     set_status(msg.split("\n")[0][:90])
 
@@ -2448,12 +2593,14 @@ def on_preset_all(ev=None):
     if not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     msgs = []
-    for key, name, desc, ordk in PRESETS:
+    for key, name, desc in PRESETS:
         set_status("Monto la proposta «%s»…" % name)
-        msgs.append(montage(SHOTS, SONG, preset_ivs(key), name, SET["fmt"], ORDERS[ordk],
-                            SET["reuse"], set_log, SEED[0]))
-    set_log("TRE TIMELINE DA CONFRONTARE in Resolve (BeaTonic_Energia, BeaTonic_Groove, "
-            "BeaTonic_Cinematico):\n\n" + "\n\n".join(msgs))
+        msgs.append(montage(SHOTS, SONG, preset_ivs(key), name, SET["fmt"], ORDERS[SET["ord"]],
+                            SET["reuse"], set_log, SEED[0],
+                            name="%s %s" % (SET["tlname"], name) if SET["tlname"] else None))
+    base = (SET["tlname"] + " ") if SET["tlname"] else "BeaTonic_"
+    set_log("TRE TIMELINE DA CONFRONTARE in Resolve (%sEnergia, %sGroove, %sCinematico):\n\n"
+            % (base, base, base) + "\n\n".join(msgs))
     set_status("Create le tre timeline delle proposte.")
 
 
@@ -2488,7 +2635,7 @@ def on_make(ev):
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, ivs, tag, SET["fmt"],
                   ORDERS.get(SET["ord"], "nameaz"),
-                  SET["reuse"], set_log, SEED[0])
+                  SET["reuse"], set_log, SEED[0], name=SET["tlname"] or None)
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg.split("\n")[0][:90])
 
@@ -2607,11 +2754,6 @@ label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 
 .seg button:hover { background: var(--seg-h); }
 .seg button.on { background: var(--accent-bg); color: var(--onaccent); box-shadow: var(--onshadow); }
 .seg button.on small { color: inherit; opacity: .8; }
-.row { display: grid; grid-template-columns: 1.3fr .8fr .5fr; gap: 14px; align-items: end; }
-.row > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.dur { display: flex; align-items: center; gap: 8px; font-weight: 700; }
-.dur input { width: 100%; font: inherit; font-size: 20px; font-weight: 800; color: var(--fg); background: var(--seg);
-  border: var(--bd2); border-radius: calc(var(--r) - 6px); padding: 6px 10px; outline: none; }
 .switch { all: unset; cursor: pointer; width: 54px; height: 32px; border-radius: 999px; background: var(--seg); border: var(--bd2); position: relative; display: block; }
 .switch i { position: absolute; top: 4px; left: 4px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transition: .2s; }
 .switch.on { background: var(--accent-bg); }
@@ -2627,21 +2769,6 @@ label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 
 .btn.working::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent); animation: sh 1.1s infinite; }
 @keyframes sh { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
-.presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.preset { background: var(--tile); border: var(--bd2); border-radius: calc(var(--r) - 4px); padding: 14px;
-  display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.pname { font: var(--titlefont); font-size: 21px; line-height: 1.1; background: var(--titlebg);
-  -webkit-background-clip: text; background-clip: text; color: transparent; }
-.pdesc { font-size: 12.5px; color: var(--muted); min-height: 3.9em; }
-.strip { width: 100%; height: 30px; border-radius: 6px; border: var(--bd2); display: block; }
-.pstats { font-size: 12px; color: var(--muted); }
-.pstats b { color: var(--fg); }
-.pbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.pbtns .btn { padding: 9px 6px; font-size: 12.5px; }
-body.look-studio { --stripA: #f5f3ff; --stripB: #7c3aed; }
-body.look-labs { --stripA: #0E0418; --stripB: #ffffff; }
-body.look-notte { --stripA: #F7A541; --stripB: #2A0B4A; }
-@media (max-width: 860px) { .presets { grid-template-columns: 1fr; } }
 .link { all: unset; cursor: pointer; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--head); }
 .link:hover { text-decoration: underline; }
 .link[hidden] { display: none; }
@@ -2658,7 +2785,48 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
 .overlay { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.6); z-index: 9; }
 .overlay[hidden] { display: none; }
 .overlay .card { max-width: 520px; }
-@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr 1fr; } }
+
+.pin { all: unset; cursor: pointer; padding: 7px 13px; border-radius: 999px; font-weight: 700; font-size: 12px;
+  color: var(--muted); background: var(--seg); border: var(--bd2); white-space: nowrap; }
+.pin.on { background: var(--accent-bg); color: var(--onaccent); }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.row > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dur { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.dur input { width: 100%; font: inherit; font-size: 22px; font-weight: 800; color: var(--fg); background: var(--seg);
+  border: var(--bd2); border-radius: calc(var(--r) - 6px); padding: 6px 10px; outline: none; }
+.dur input:disabled { opacity: .35; }
+.opt { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.opt .t b { display: block; font-size: 13.5px; }
+.opt .t small { display: block; font-size: 11.5px; color: var(--muted); }
+.opt .switch { flex: none; }
+.songbox { font-size: 12.5px; color: var(--muted); }
+.songbox b { color: var(--fg); }
+.btn.big { font-family: var(--ctafont); font-size: 20px; padding: 18px; letter-spacing: .03em; }
+.notice { padding: 10px 14px; border-radius: calc(var(--r) - 6px); border: var(--bd2); background: var(--seg-h); font-size: 13px; }
+.notice[hidden] { display: none; }
+.presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.preset { background: var(--tile); border: var(--bd2); border-radius: calc(var(--r) - 4px); padding: 14px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; position: relative; }
+.preset.mine { border-color: var(--accent); box-shadow: var(--onshadow); }
+.preset .tagm { position: absolute; top: -9px; left: 12px; font-size: 10px; font-weight: 800; letter-spacing: .12em;
+  padding: 2px 8px; border-radius: 999px; background: var(--accent-bg); color: var(--onaccent); }
+.pname { font: var(--titlefont); font-size: 20px; line-height: 1.1; background: var(--titlebg);
+  -webkit-background-clip: text; background-clip: text; color: transparent; overflow-wrap: anywhere; }
+.pdesc { font-size: 12.5px; color: var(--muted); min-height: 3.9em; }
+.strip { width: 100%; height: 30px; border-radius: 6px; border: var(--bd2); display: block; }
+.pstats { font-size: 12px; color: var(--muted); }
+.pstats b { color: var(--fg); }
+.pbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pbtns .btn { padding: 9px 6px; font-size: 12.5px; }
+body.look-studio { --stripA: #f5f3ff; --stripB: #7c3aed; }
+body.look-labs { --stripA: #0E0418; --stripB: #ffffff; }
+body.look-notte { --stripA: #F7A541; --stripB: #2A0B4A; }
+.makerow { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; }
+.makerow input { width: 100%; font: inherit; font-size: 15px; font-weight: 700; color: var(--fg); background: var(--seg);
+  border: var(--bd2); border-radius: calc(var(--r) - 6px); padding: 10px 12px; outline: none; }
+@media (max-width: 1100px) { .presets { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .row, .makerow { grid-template-columns: 1fr; } }
+@media (max-width: 560px) { .presets { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body class="look-studio" data-look="studio">
@@ -2667,7 +2835,8 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
   <img id="logo" src="/logo" alt="">
   <div class="brand"><div class="name">BeaTonic</div><div class="tag">montaggio a tempo di musica · Plutonic</div></div>
   <div class="spacer"></div>
-  <div class="looks" title="Aspetto della finestra (anche l'editor dei marker lo segue)">
+  <button class="pin" id="pin" title="Tiene le finestre di BeaTonic davanti a Resolve anche quando clicchi nel Media Pool">📌 Sempre davanti</button>
+  <div class="looks" title="Aspetto delle finestre (pannello ed editor dei marker)">
     <span>Aspetto</span>
     <button data-look="studio">Studio</button><button data-look="labs">Labs</button><button data-look="notte">Notte</button>
   </div>
@@ -2677,48 +2846,56 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
     <h2><span class="n">1</span> Materiale dal Media Pool</h2>
     <div class="tiles">
       <div class="tile"><div class="k">Clip video</div><div class="v" id="nVid">0</div><div class="sub" id="vidNames">—</div></div>
-      <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div>
-        <button class="link" id="bUnfit" hidden title="Torna alla canzone originale (la sua analisi è già in memoria)">↺ usa l'originale</button></div>
+      <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div></div>
     </div>
     <button class="btn" id="bRefresh" title="Rilegge le clip e la canzone selezionate nel Media Pool">↻ Aggiorna selezione</button>
   </section>
   <section class="card">
-    <h2><span class="n">2</span> Analisi</h2>
-    <label>Sensibilità scene</label>
-    <div class="seg" id="sens"></div>
-    <button class="btn primary" id="bAnalyze">Analizza clip e canzone</button>
-    <div class="chips" id="chips"></div>
+    <h2><span class="n">2</span> Durata e canzone</h2>
+    <div class="row">
+      <div><label>Durata del montaggio</label>
+        <div class="dur"><input id="dur" type="number" min="1" step="1"><span>s</span></div></div>
+      <div><label>&nbsp;</label>
+        <label class="opt" title="Il montaggio dura quanto tutta la canzone"><button class="switch" id="full" role="switch"><i></i></button>
+          <span class="t"><b>Canzone intera</b><small>dura quanto la canzone</small></span></label></div>
+    </div>
+    <label class="opt" title="Come l'AI Music Editor: la stessa canzone, più corta o più lunga, con inizio e finale veri">
+      <button class="switch" id="fit" role="switch"><i></i></button>
+      <span class="t"><b>Adatta la canzone alla durata</b><small>stessa canzone, inizio e finale veri, salti che non si sentono</small></span></label>
+    <div class="songbox" id="songBox"></div>
   </section>
   <section class="card wide">
-    <h2><span class="n">3</span> Proposte di montaggio</h2>
-    <p class="hint">Tre montaggi diversi della stessa canzone. La striscia mostra i tagli lungo la canzone:
-      aprili nell'editor per ritoccarli, o montali direttamente (formato e "riusa clip" dal punto 4).</p>
-    <div class="presets" id="presets"></div>
-    <button class="btn" id="bAll" title="Crea tre timeline in Resolve, una per proposta, da confrontare">▶ Monta tutte e 3 — tre timeline da confrontare in Resolve</button>
-  </section>
-  <section class="card wide">
-    <h2><span class="n">4</span> Oppure personalizza: ritmo e formato</h2>
-    <label>Stile dei tagli</label>
+    <h2><span class="n">3</span> Ritmo, formato e clip</h2>
+    <label>Il tuo ritmo</label>
     <div class="seg" id="style"></div>
     <div class="row">
       <div><label>Formato</label><div class="seg" id="fmt"></div></div>
-      <div><label>Durata del montaggio</label><div class="dur"><input id="dur" type="number" min="1" step="1"><span>s</span></div></div>
-      <div><label title="Se il video finisce prima della durata: acceso ricomincia, spento si ferma">Riusa clip</label>
-        <button class="switch" id="reuse" role="switch" title="Se il video finisce prima della durata: acceso ricomincia da capo, spento si ferma"><i></i></button></div>
+      <div><label>Ordine delle clip</label><div class="seg" id="ord"></div></div>
     </div>
-    <label>Ordine delle clip</label>
-    <div class="seg" id="ord"></div>
+    <div class="row">
+      <div><label>Sensibilità scene (come dividere le clip)</label><div class="seg" id="sens"></div></div>
+      <div><label>&nbsp;</label>
+        <label class="opt" title="Se il video finisce prima della durata: acceso ricomincia da capo, spento si ferma">
+          <button class="switch" id="reuse" role="switch"><i></i></button>
+          <span class="t"><b>Riusa le clip</b><small>se il materiale finisce prima, ricomincia un giro</small></span></label></div>
+    </div>
   </section>
-  <section class="card">
-    <h2><span class="n">5</span> Canzone e tagli</h2>
-    <button class="btn" id="bFit">♪ Adatta la canzone alla durata</button>
-    <p class="hint">Stessa canzone, inizio e finale veri: solo più corta o più lunga, senza tagli udibili.</p>
-    <button class="btn" id="bMark">◆ Apri l'editor dei marker</button>
-    <p class="hint" id="markInfo">Vedi la canzone e l'anteprima del montato, e sistemi i tagli.</p>
+  <section class="card wide">
+    <h2><span class="n">4</span> Analizza</h2>
+    <button class="btn primary big" id="bAnalyze">Analizza e prepara i montaggi</button>
+    <div class="notice" id="stale" hidden></div>
+    <div class="chips" id="chips"></div>
   </section>
-  <section class="card go">
-    <button class="btn cta" id="bMake">▶ Monta</button>
-    <p class="hint" style="text-align:center">Crea la timeline in Resolve: una clip tra un marker e l'altro, sul ritmo.</p>
+  <section class="card wide">
+    <h2><span class="n">5</span> Scegli il montaggio</h2>
+    <p class="hint">Il tuo ritmo e tre proposte diverse, tutte con durata, formato e ordine che hai scelto. La striscia mostra
+      dove cadono i tagli: aprili nell'editor per ritoccarli, o montali.</p>
+    <div class="presets" id="presets"></div>
+    <div class="makerow">
+      <div style="display:flex;flex-direction:column;gap:6px;min-width:0"><label>Nome della timeline in Resolve</label>
+        <input id="tlname" maxlength="80" placeholder="automatico (es. BeaTonic_Groove)" spellcheck="false"></div>
+      <button class="btn" id="bAll" title="Crea tre timeline in Resolve, una per proposta, da confrontare">▶ Monta le 3 proposte</button>
+    </div>
   </section>
   <section class="card wide">
     <div class="status"><span class="dot"></span><span id="status">Pronto.</span><span class="spacer"></span>
@@ -2731,17 +2908,16 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene delle clip e beat della canzone…",
-  fit: "Adatto la canzone alla durata…", unfit: "Torno alla canzone originale…", mark: "Apro l'editor dei marker…",
-  make: "Monto la timeline in Resolve…", quit: "Chiudo…", preset_edit: "Apro la proposta nell'editor…",
-  preset_make: "Monto la proposta in Resolve…", preset_all: "Monto le tre proposte in Resolve…"};
-const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", unfit: "bUnfit", mark: "bMark", make: "bMake",
-  preset_all: "bAll", quit: "bQuit"};
-let presetSig = "", lastLocal = 0;
-let ST = null, inited = false, lastLog = null, fails = 0, closing = false;
+const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene, beat e (se serve) canzone adattata…",
+  mark: "Apro l'editor dei marker…", make: "Monto la timeline in Resolve…", quit: "Chiudo…",
+  preset_edit: "Apro il montaggio nell'editor…", preset_make: "Monto la timeline in Resolve…",
+  preset_all: "Monto le tre proposte in Resolve…"};
+const BTN = {refresh: "bRefresh", analyze: "bAnalyze", preset_all: "bAll", quit: "bQuit"};
+let ST = null, inited = false, lastLog = null, fails = 0, closing = false, presetSig = "", lastLocal = 0;
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
 const split = s => { const m = /^(.*?)\s*\((.*)\)\s*$/.exec(s); return m ? [m[1], m[2]] : [s, ""]; };
 const mmss = t => Math.floor(t / 60) + ":" + String(Math.round(t % 60)).padStart(2, "0");
+const on = id => $(id).classList.contains("on");
 
 function seg(id, opts, val, short) {
   const el = $(id);
@@ -2757,7 +2933,8 @@ function seg(id, opts, val, short) {
 }
 const pick = id => { const b = $(id).querySelector(".on"); return b ? b.dataset.v : ""; };
 const collect = () => ({sens: pick("sens"), style: pick("style"), fmt: pick("fmt"), ord: pick("ord"),
-  dur: parseFloat($("dur").value) || 30, reuse: $("reuse").classList.contains("on"), look: document.body.dataset.look});
+  dur: parseFloat($("dur").value) || 30, reuse: on("reuse"), full: on("full"), fit: on("fit"),
+  tlname: $("tlname").value, ontop: on("pin"), look: document.body.dataset.look});
 function push() { lastLocal = Date.now(); fetch("/api/set", {method: "POST", body: JSON.stringify(collect())}).catch(() => {}); }
 function cmd(c, arg) {
   if (ST && ST.busy) return;
@@ -2765,14 +2942,16 @@ function cmd(c, arg) {
   fetch("/api/cmd", {method: "POST", body: JSON.stringify({cmd: c, arg: arg, set: collect()})}).catch(() => {});
   if (ST) { ST.busy = c; render(); }
 }
-function syncControls() {                     // il plugin puo' cambiare le impostazioni (es. ordine di una proposta)
+function syncControls() {                     // il plugin puo' cambiare le impostazioni
   if (Date.now() - lastLocal < 2000) return;
   for (const k of ["sens", "style", "fmt", "ord"])
     for (const b of $(k).children) b.classList.toggle("on", b.dataset.v === ST.set[k]);
   if (document.activeElement !== $("dur")) $("dur").value = Math.round(ST.set.dur * 100) / 100;
-  $("reuse").classList.toggle("on", !!ST.set.reuse);
+  if (document.activeElement !== $("tlname")) $("tlname").value = ST.set.tlname || "";
+  for (const k of ["reuse", "full", "fit"]) $(k).classList.toggle("on", !!ST.set[k]);
+  $("pin").classList.toggle("on", ST.set.ontop !== false);
 }
-function drawStrip(c, marks) {                // i tagli lungo la canzone: si alternano due colori
+function drawStrip(c, marks) {                // i tagli lungo il montaggio: si alternano due colori
   const w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1;
   c.width = w * dpr; c.height = h * dpr;
   const g = c.getContext("2d"), cs = getComputedStyle(document.body), end = marks[marks.length - 1] || 1;
@@ -2786,25 +2965,28 @@ function drawStrip(c, marks) {                // i tagli lungo la canzone: si al
 }
 function renderPresets() {
   const ps = ST.presets || [];
-  const sig = JSON.stringify(ps.map(p => [p.key, p.n, p.marks[p.marks.length - 1]])) + document.body.dataset.look;
+  const sig = JSON.stringify(ps.map(p => [p.key, p.name, p.n, p.marks[p.marks.length - 1]])) + document.body.dataset.look;
   if (sig !== presetSig) {
     presetSig = sig;
     const box = $("presets");
-    box.innerHTML = ps.length ? "" : "<div class='hint'>Analizza clip e canzone per vedere le proposte.</div>";
+    box.innerHTML = ps.length ? "" : "<div class='hint'>Imposta qui sopra e premi Analizza: le opzioni di montato compaiono qui.</div>";
     for (const p of ps) {
-      const el = document.createElement("div");
-      el.className = "preset";
-      el.innerHTML = "<div class='pname'>" + esc(p.name) + "</div><div class='pdesc'>" + esc(p.desc) + "</div>" +
+      const el = document.createElement("div"), mine = p.key === "mine";
+      el.className = "preset" + (mine ? " mine" : "");
+      el.innerHTML = (mine ? "<span class='tagm'>IL TUO</span>" : "") +
+        "<div class='pname'>" + esc(p.name) + "</div><div class='pdesc'>" + esc(p.desc) + "</div>" +
         "<canvas class='strip'></canvas><div class='pstats'><b>" + p.n + "</b> stacchi · media <b>" +
-        p.avg.toFixed(1).replace(".", ",") + " s</b> · " + esc(p.ord.toLowerCase()) + "</div>" +
+        p.avg.toFixed(1).replace(".", ",") + " s</b> · fine <b>" + mmss(p.marks[p.marks.length - 1] || 0) + "</b></div>" +
         "<div class='pbtns'><button class='btn' data-c='preset_edit'>◆ Apri nell'editor</button>" +
-        "<button class='btn primary' data-c='preset_make'>▶ Monta questa</button></div>";
+        "<button class='btn primary' data-c='preset_make'>▶ Monta</button></div>";
       for (const b of el.querySelectorAll("button")) b.onclick = () => cmd(b.dataset.c, p.key);
       box.appendChild(el);
       drawStrip(el.querySelector("canvas"), p.marks);
     }
   }
-  for (const b of $("presets").querySelectorAll("button")) b.disabled = !!ST.busy;
+  for (const b of $("presets").querySelectorAll("button")) {
+    b.disabled = !!ST.busy;
+  }
 }
 window.addEventListener("resize", () => { presetSig = ""; if (ST) renderPresets(); });
 function setLook(l) {
@@ -2830,8 +3012,8 @@ function init() {
   seg("style", o.style, s.style);
   seg("fmt", o.fmt, s.fmt, x => { const m = /^(\S+)\s+(\d+:\d+)$/.exec(x); return m ? m[2] + " (" + m[1].toLowerCase() + ")" : x; });
   seg("ord", o.ord, s.ord, x => x.replace(/^Ord:\s*/, ""));
-  $("dur").value = Math.round(s.dur * 100) / 100;
-  $("reuse").classList.toggle("on", !!s.reuse);
+  lastLocal = 0;
+  syncControls();
   setLook(s.look || "studio");
 }
 function render() {
@@ -2839,15 +3021,23 @@ function render() {
   $("nVid").textContent = v.length;
   $("vidNames").textContent = v.length ? v.slice(0, 3).join(" · ") + (v.length > 3 ? " +" + (v.length - 3) : "") : "selezionale nel Media Pool";
   $("songName").textContent = ST.sel.song || "—";
-  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata · originale: " + inf.orig : "")
-                                                          : "da analizzare")
+  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata" : "") : "da analizzare")
                                           : "selezionala nel Media Pool";
-  $("bUnfit").hidden = !inf.fitted;
+  const full = on("full"), fit = on("fit");
+  $("dur").disabled = full;
+  $("fit").parentElement.style.opacity = full ? .45 : 1;
+  $("songBox").innerHTML = !inf.song_len ? "Dopo l'analisi qui vedi quanto dura la canzone in uso." :
+    inf.fitted ? "In uso: <b>versione adattata a " + inf.song_len.toFixed(1).replace(".", ",") + " s</b> (originale «" + esc(inf.orig) + "»)."
+               : "In uso: <b>canzone originale, " + mmss(inf.song_len) + "</b>" +
+                 (full ? ": il montaggio dura quanto lei." : fit ? "." : ": il montaggio si ferma sul «1» più vicino alla durata.");
+  $("stale").hidden = !inf.stale || !!ST.busy;
+  $("stale").innerHTML = fit && !full ? "Hai chiesto la canzone adattata a <b>" + $("dur").value + " s</b>: premi <b>Analizza</b> per prepararla (le clip già analizzate restano)."
+                                      : "Premi <b>Analizza</b> per tornare alla canzone originale.";
+  $("bAnalyze").textContent = inf.analyzed ? (inf.stale ? "Analizza e prepara i montaggi" : "↻ Analizza di nuovo") : "Analizza e prepara i montaggi";
   $("chips").innerHTML = inf.analyzed ?
-    ["<b>" + inf.shots + "</b> pezzi video", "<b>" + Math.round(inf.bpm) + "</b> BPM", "<b>" + inf.bars + "</b> battute", "<b>" + inf.beats + "</b> beat"]
+    ["<b>" + inf.shots + "</b> pezzi video", "<b>" + Math.round(inf.bpm) + "</b> BPM", "<b>" + inf.bars + "</b> battute", "<b>" + inf.beats + "</b> beat",
+     "montaggio di <b>" + inf.dur.toFixed(1).replace(".", ",") + "</b> s"]
       .map(x => "<span class='chip'>" + x + "</span>").join("") : "<span class='chip'>non ancora analizzato</span>";
-  $("markInfo").textContent = inf.marks ? inf.marks + " marker pronti: si salvano da soli dall'editor."
-                                        : "Vedi la canzone e l'anteprima del montato, e sistemi i tagli.";
   if (ST.log !== lastLog) { const L = $("log"); L.textContent = ST.log; L.scrollTop = 0; lastLog = ST.log; }
   $("status").textContent = ST.busy ? (BUSY[ST.busy] || "Lavoro…") : ST.status;
   document.body.classList.toggle("busy", !!ST.busy);
@@ -2855,8 +3045,8 @@ function render() {
     $(id).disabled = !!ST.busy && c !== ST.busy;
     $(id).classList.toggle("working", ST.busy === c);
   }
-  for (const id of ["bAnalyze"]) if (!ST.busy) $(id).disabled = !(v.length && ST.sel.song);
-  for (const id of ["bFit", "bMark", "bMake", "bAll"]) if (!ST.busy) $(id).disabled = !inf.analyzed;
+  if (!ST.busy) $("bAnalyze").disabled = !(v.length && ST.sel.song);
+  if (!ST.busy) $("bAll").disabled = !inf.analyzed;
   renderPresets();
   syncControls();
 }
@@ -2872,8 +3062,11 @@ async function poll() {
   setTimeout(poll, ST && ST.busy ? 300 : 700);
 }
 for (const b of document.querySelectorAll(".looks button")) b.onclick = () => { setLook(b.dataset.look); push(); };
-$("reuse").onclick = () => { $("reuse").classList.toggle("on"); push(); };
+for (const k of ["reuse", "full", "fit", "pin"]) $(k).onclick = e => { e.preventDefault(); $(k).classList.toggle("on"); push(); if (ST) render(); };
 $("dur").addEventListener("change", push);
+$("dur").addEventListener("input", () => { lastLocal = Date.now(); });
+$("tlname").addEventListener("change", push);
+$("tlname").addEventListener("input", () => { lastLocal = Date.now(); });
 for (const [c, id] of Object.entries(BTN)) $(id).onclick = () => cmd(c);
 favicon();
 poll();
@@ -2898,7 +3091,8 @@ def main():
     port = start_server()
     print("BeaTonic: pannello su http://127.0.0.1:%d/" % port)
     _open_window(_url(), (1180, 860))
-    started = time.time()
+    _bring_front(TITLES[0], SET["ontop"])
+    started = last_pin = time.time()
     while not STATE["quit"]:
         try:
             cmd, arg = CMDQ.get(timeout=0.25)
@@ -2914,6 +3108,9 @@ def main():
                 set_status("Errore: %s" % e)
             finally:
                 STATE["busy"] = ""
+        if SET["ontop"] and time.time() - last_pin > 2.0:
+            last_pin = time.time()
+            _pin_windows(TITLES, True)   # sempre davanti, anche le finestre appena aperte
         last = STATE["pinged"] or started
         if time.time() - last > (25 if STATE["pinged"] else 180):
             break                        # nessuna finestra aperta da un po': fine
