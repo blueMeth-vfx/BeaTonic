@@ -85,7 +85,7 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
 2. **Aggiorna selezione** → controlla che veda N clip + la canzone.
 3. **Analizza**: ffmpeg trova i cambi di scena e i beat. Clip e canzoni già analizzate
    restano in memoria: rifare Analizza è istantaneo (rianalizza solo le novità).
-   *(È l'operazione lenta: la finestra resta ferma mentre lavora.)*
+   *(La prima volta è l'operazione più lunga: il pannello mostra l'avanzamento.)*
    - Le clip vengono divise sia agli **stacchi** veri sia ai **cambi d'inquadratura**
      dentro una ripresa continua (la camera si sposta su un altro soggetto).
    - **Sensibilità scene**: *Media* è la consigliata; *Alta* trova più divisioni;
