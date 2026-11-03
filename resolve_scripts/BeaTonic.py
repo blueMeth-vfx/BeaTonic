@@ -475,10 +475,11 @@ FORMATS = {
 
 
 def _cut_points(beats, bpos, style, intens):
-    """Punti di stacco scelti SULLA GRIGLIA MUSICALE: beat, mezze battute o battute."""
-    mode = STYLES.get(style, "beat")
+    """Punti di stacco scelti SULLA GRIGLIA MUSICALE: beat, mezze battute o battute.
+    'style' e' uno stile (STYLES) o una delle PROPOSTE (energia / groove / cinema)."""
+    mode = STYLES.get(style, style)
     barv = [0.5] * len(beats)
-    if mode == "dyn":                 # energia di ogni battuta = media dei suoi beat
+    if mode in ("dyn", "energia", "groove", "cinema"):   # energia di ogni battuta
         i = 0
         while i < len(beats):
             j = i + 1
@@ -489,17 +490,23 @@ def _cut_points(beats, bpos, style, intens):
             for k in range(i, j):
                 barv[k] = v
             i = j
-    pts = []
+    pts, barno = [], 0
     for i, t in enumerate(beats):
-        p = bpos[i]
+        p, v = bpos[i], barv[i]
+        barno += 1 if p == 0 else 0
         if mode == "beat":
             keep = True
         elif mode == "half":
             keep = p in (0, 2)
         elif mode == "bar":
             keep = p == 0
+        elif mode == "energia":       # serrato: ogni beat appena la canzone spinge
+            keep = True if v >= 0.45 else (p in (0, 2) if v >= 0.15 else p == 0)
+        elif mode == "groove":        # sull'1 e sul 3, ogni beat solo nei punti piu' forti
+            keep = p in (0, 2) or v >= 0.8
+        elif mode == "cinema":        # una battuta per inquadratura, due nelle parti calme
+            keep = p == 0 and (v >= 0.4 or barno % 2 == 1)
         else:                         # dinamico: fitto se spinge, largo se calmo
-            v = barv[i]
             keep = True if v >= 0.6 else (p in (0, 2) if v >= 0.33 else p == 0)
         if keep:
             pts.append(t)
@@ -530,6 +537,15 @@ def _intervals(beats, bpos, style, dur, intens, song_len=0.0):
     bounds = [0.0] + pts
     return list(zip(bounds, bounds[1:]))
 
+
+PRESETS = [   # (chiave, nome, descrizione, ordine delle clip): tre montaggi diversi tra loro
+    ("energia", "Energia", "Un taglio a ogni beat dove la canzone spinge, a mezza battuta altrove: "
+     "ritmo serrato, clip mischiate.", "Ord: Casuale (mischia tutto)"),
+    ("groove", "Groove", "Tagli sull'1 e sul 3 della battuta, ogni beat solo nei punti più forti: "
+     "segue il ballo, clip in sequenza.", "Ord: Nome A→Z"),
+    ("cinema", "Cinematico", "Un'inquadratura per battuta, due battute nelle parti calme: "
+     "lascia respirare le immagini.", "Ord: Selezione"),
+]
 
 ORDERS = {
     "Ord: Nome A→Z": "nameaz",
@@ -1022,7 +1038,7 @@ function doUndo() { if (!undo.length) return; redo.push(marks.slice()); marks = 
 function doRedo() { if (!redo.length) return; undo.push(marks.slice()); marks = redo.pop(); sel = -1; changed(); }
 function cutPoints(mode) {                   // come BeaTonic: punti di stacco sulla griglia
   const b = S.beats, p = S.bpos, it = S.intens || [], barv = new Array(b.length).fill(0.5);
-  if (mode === "dyn") {
+  if (["dyn", "energia", "groove", "cinema"].includes(mode)) {
     let i = 0;
     while (i < b.length) {
       let j = i + 1;
@@ -1033,13 +1049,18 @@ function cutPoints(mode) {                   // come BeaTonic: punti di stacco s
     }
   }
   const out = [];
+  let barno = 0;
   for (let i = 0; i < b.length; i++) {
-    const q = p[i];
+    const q = p[i], v = barv[i];
+    if (q === 0) barno++;
     let keep;
     if (mode === "beat") keep = true;
     else if (mode === "half") keep = q === 0 || q === 2;
     else if (mode === "bar") keep = q === 0;
-    else { const v = barv[i]; keep = v >= 0.6 ? true : (v >= 0.33 ? (q === 0 || q === 2) : q === 0); }
+    else if (mode === "energia") keep = v >= 0.45 ? true : (v >= 0.15 ? (q === 0 || q === 2) : q === 0);
+    else if (mode === "groove") keep = q === 0 || q === 2 || v >= 0.8;
+    else if (mode === "cinema") keep = q === 0 && (v >= 0.4 || barno % 2 === 1);
+    else keep = v >= 0.6 ? true : (v >= 0.33 ? (q === 0 || q === 2) : q === 0);
     if (keep) out.push(b[i]);
   }
   return out;
@@ -1557,7 +1578,7 @@ class _Handler(BaseHTTPRequestHandler):
             _apply_settings(d)
         elif p == "/api/cmd":
             _apply_settings(d.get("set") or {})
-            CMDQ.put(d.get("cmd"))
+            CMDQ.put((d.get("cmd"), d.get("arg")))
         else:
             return self._send(b"not found", "text/plain", 404)
         self._send(b"ok", "text/plain")
@@ -1637,7 +1658,8 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
     sess = {"session": SESSION[0], "song_name": song.GetName(), "song_path": path,
             "beats": beats, "bpos": bpos, "intens": intens, "bpm": bpm, "marks": marks,
             "fps": fps, "theme": theme, "style": style, "dur": dur, "min_cut": MIN_CUT,
-            "styles": [[k, v] for k, v in STYLES.items()],
+            "styles": [[k, v] for k, v in STYLES.items()] +
+                      [["Proposta " + name, key] for key, name, _d, _o in PRESETS],
             "logo": _LOGO if os.path.exists(_LOGO) else ""}
     sess["clips"], sess["tape"] = _preview_data(tape)
     sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG)
@@ -2187,7 +2209,7 @@ def _state():
     perche' questa funzione gira nei thread del server)."""
     saved = editor_marks()
     return {"sel": STATE["sel"], "set": SET, "log": STATE["log"], "status": STATE["status"],
-            "busy": STATE["busy"], "quit": STATE["quit"],
+            "busy": STATE["busy"], "quit": STATE["quit"], "presets": _presets_info(),
             "opts": {"sens": list(SENS), "style": list(STYLES), "fmt": list(FORMATS), "ord": list(ORDERS)},
             "info": {"analyzed": bool(BEATS and SHOTS), "shots": len(SHOTS), "bpm": BPM,
                      "beats": len(BEATS), "bars": sum(1 for p in BPOS if p == 0),
@@ -2281,8 +2303,9 @@ def on_mark(ev):
     elif not MARKS:
         MARKS[:] = marks_from_beats()
     W, H = FORMATS.get(SET["fmt"], (1920, 1080))
+    style = ev if isinstance(ev, str) else SET["style"]   # una proposta apre col suo taglio
     ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
-                           SET["style"], _dur(), "labs" if SET["look"] == "labs" else "studio",
+                           style, _dur(), "labs" if SET["look"] == "labs" else "studio",
                            tape=_tape(), reuse=SET["reuse"], aspect=W / float(H))
     if not ok:
         set_log(info); set_status(info); return
@@ -2364,6 +2387,76 @@ def on_fit(ev):
     set_status("Canzone adattata a %.2f s." % length)
 
 
+def _preset(key):
+    return next((p for p in PRESETS if p[0] == key), None)
+
+
+def preset_ivs(key):
+    return _intervals(BEATS, BPOS, key, _dur(), INTENS, SONG_LEN[0])
+
+
+def _presets_info():
+    """Le tre proposte per la finestra: tagli, quanti stacchi, durata media."""
+    if not (BEATS and SHOTS) or STATE["busy"] in ("analyze", "fit", "unfit", "refresh"):
+        return []                        # (l'analisi cambia mentre la si legge)
+    out = []
+    for key, name, desc, ordk in PRESETS:
+        ivs = preset_ivs(key)
+        L = [b - a for a, b in ivs]
+        out.append({"key": key, "name": name, "desc": desc, "ord": ordk.replace("Ord: ", ""),
+                    "marks": [round(b, 3) for _, b in ivs],
+                    "n": len(L), "avg": sum(L) / len(L) if L else 0.0})
+    return out
+
+
+def _save_marks(marks):
+    """Marker in uso (anche per l'editor, che legge quelli salvati)."""
+    MARKS[:] = marks
+    try:
+        os.makedirs(WEB, exist_ok=True)
+        with open(os.path.join(WEB, "markers.json"), "w", encoding="utf-8") as f:
+            json.dump({"session": SESSION[0], "marks": marks}, f)
+    except Exception:
+        pass
+
+
+def on_preset_edit(key):
+    """Apre la proposta nell'editor dei marker, per ritoccarla."""
+    p = _preset(key)
+    if not p or not BEATS:
+        set_log("Prima premi 'Analizza'."); return
+    SET["ord"] = p[3]                    # l'anteprima e il montaggio usano il suo ordine
+    SESSION[0] = "%x" % int(time.time() * 1000)   # un editor gia' aperto non la sovrascrive
+    _save_marks([b for _, b in preset_ivs(key)])
+    on_mark("Proposta " + p[1])
+    set_log("Proposta «%s» aperta nell'editor: %s\n\n%s" % (p[1], p[2], STATE["log"]))
+
+
+def on_preset_make(key):
+    """Monta direttamente la proposta."""
+    p = _preset(key)
+    if not p or not SHOTS or not SONG:
+        set_log("Prima premi 'Analizza'."); return
+    msg = montage(SHOTS, SONG, preset_ivs(key), p[1], SET["fmt"], ORDERS[p[3]],
+                  SET["reuse"], set_log, SEED[0])
+    set_log("%s\nProposta «%s»: %s" % (msg, p[1], p[2]))
+    set_status(msg.split("\n")[0][:90])
+
+
+def on_preset_all(ev=None):
+    """Monta tutte e tre le proposte: tre timeline da confrontare in Resolve."""
+    if not SHOTS or not SONG:
+        set_log("Prima premi 'Analizza'."); return
+    msgs = []
+    for key, name, desc, ordk in PRESETS:
+        set_status("Monto la proposta «%s»…" % name)
+        msgs.append(montage(SHOTS, SONG, preset_ivs(key), name, SET["fmt"], ORDERS[ordk],
+                            SET["reuse"], set_log, SEED[0]))
+    set_log("TRE TIMELINE DA CONFRONTARE in Resolve (BeaTonic_Energia, BeaTonic_Groove, "
+            "BeaTonic_Cinematico):\n\n" + "\n\n".join(msgs))
+    set_status("Create le tre timeline delle proposte.")
+
+
 def on_unfit(ev=None):
     """Torna alla canzone originale (la sua analisi e' gia' in memoria)."""
     if not FITTED:
@@ -2405,7 +2498,8 @@ def on_close(ev=None):
 
 
 CMDS = {"refresh": on_refresh, "analyze": on_analyze, "fit": on_fit, "unfit": on_unfit,
-        "mark": on_mark, "make": on_make, "quit": on_close}
+        "mark": on_mark, "make": on_make, "preset_edit": on_preset_edit,
+        "preset_make": on_preset_make, "preset_all": on_preset_all, "quit": on_close}
 
 MAIN_HTML = r"""<!doctype html>
 <html lang="it">
@@ -2533,6 +2627,21 @@ label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 
 .btn.working::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent); animation: sh 1.1s infinite; }
 @keyframes sh { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
+.presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.preset { background: var(--tile); border: var(--bd2); border-radius: calc(var(--r) - 4px); padding: 14px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pname { font: var(--titlefont); font-size: 21px; line-height: 1.1; background: var(--titlebg);
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.pdesc { font-size: 12.5px; color: var(--muted); min-height: 3.9em; }
+.strip { width: 100%; height: 30px; border-radius: 6px; border: var(--bd2); display: block; }
+.pstats { font-size: 12px; color: var(--muted); }
+.pstats b { color: var(--fg); }
+.pbtns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pbtns .btn { padding: 9px 6px; font-size: 12.5px; }
+body.look-studio { --stripA: #f5f3ff; --stripB: #7c3aed; }
+body.look-labs { --stripA: #0E0418; --stripB: #ffffff; }
+body.look-notte { --stripA: #F7A541; --stripB: #2A0B4A; }
+@media (max-width: 860px) { .presets { grid-template-columns: 1fr; } }
 .link { all: unset; cursor: pointer; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--head); }
 .link:hover { text-decoration: underline; }
 .link[hidden] { display: none; }
@@ -2581,7 +2690,14 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
     <div class="chips" id="chips"></div>
   </section>
   <section class="card wide">
-    <h2><span class="n">3</span> Ritmo e formato</h2>
+    <h2><span class="n">3</span> Proposte di montaggio</h2>
+    <p class="hint">Tre montaggi diversi della stessa canzone. La striscia mostra i tagli lungo la canzone:
+      aprili nell'editor per ritoccarli, o montali direttamente (formato e "riusa clip" dal punto 4).</p>
+    <div class="presets" id="presets"></div>
+    <button class="btn" id="bAll" title="Crea tre timeline in Resolve, una per proposta, da confrontare">▶ Monta tutte e 3 — tre timeline da confrontare in Resolve</button>
+  </section>
+  <section class="card wide">
+    <h2><span class="n">4</span> Oppure personalizza: ritmo e formato</h2>
     <label>Stile dei tagli</label>
     <div class="seg" id="style"></div>
     <div class="row">
@@ -2594,7 +2710,7 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
     <div class="seg" id="ord"></div>
   </section>
   <section class="card">
-    <h2><span class="n">4</span> Canzone e tagli</h2>
+    <h2><span class="n">5</span> Canzone e tagli</h2>
     <button class="btn" id="bFit">♪ Adatta la canzone alla durata</button>
     <p class="hint">Stessa canzone, inizio e finale veri: solo più corta o più lunga, senza tagli udibili.</p>
     <button class="btn" id="bMark">◆ Apri l'editor dei marker</button>
@@ -2617,8 +2733,11 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
 const $ = id => document.getElementById(id);
 const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene delle clip e beat della canzone…",
   fit: "Adatto la canzone alla durata…", unfit: "Torno alla canzone originale…", mark: "Apro l'editor dei marker…",
-  make: "Monto la timeline in Resolve…", quit: "Chiudo…"};
-const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", unfit: "bUnfit", mark: "bMark", make: "bMake", quit: "bQuit"};
+  make: "Monto la timeline in Resolve…", quit: "Chiudo…", preset_edit: "Apro la proposta nell'editor…",
+  preset_make: "Monto la proposta in Resolve…", preset_all: "Monto le tre proposte in Resolve…"};
+const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", unfit: "bUnfit", mark: "bMark", make: "bMake",
+  preset_all: "bAll", quit: "bQuit"};
+let presetSig = "", lastLocal = 0;
 let ST = null, inited = false, lastLog = null, fails = 0, closing = false;
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
 const split = s => { const m = /^(.*?)\s*\((.*)\)\s*$/.exec(s); return m ? [m[1], m[2]] : [s, ""]; };
@@ -2639,12 +2758,55 @@ function seg(id, opts, val, short) {
 const pick = id => { const b = $(id).querySelector(".on"); return b ? b.dataset.v : ""; };
 const collect = () => ({sens: pick("sens"), style: pick("style"), fmt: pick("fmt"), ord: pick("ord"),
   dur: parseFloat($("dur").value) || 30, reuse: $("reuse").classList.contains("on"), look: document.body.dataset.look});
-function push() { fetch("/api/set", {method: "POST", body: JSON.stringify(collect())}).catch(() => {}); }
-function cmd(c) {
+function push() { lastLocal = Date.now(); fetch("/api/set", {method: "POST", body: JSON.stringify(collect())}).catch(() => {}); }
+function cmd(c, arg) {
   if (ST && ST.busy) return;
-  fetch("/api/cmd", {method: "POST", body: JSON.stringify({cmd: c, set: collect()})}).catch(() => {});
+  lastLocal = Date.now();
+  fetch("/api/cmd", {method: "POST", body: JSON.stringify({cmd: c, arg: arg, set: collect()})}).catch(() => {});
   if (ST) { ST.busy = c; render(); }
 }
+function syncControls() {                     // il plugin puo' cambiare le impostazioni (es. ordine di una proposta)
+  if (Date.now() - lastLocal < 2000) return;
+  for (const k of ["sens", "style", "fmt", "ord"])
+    for (const b of $(k).children) b.classList.toggle("on", b.dataset.v === ST.set[k]);
+  if (document.activeElement !== $("dur")) $("dur").value = Math.round(ST.set.dur * 100) / 100;
+  $("reuse").classList.toggle("on", !!ST.set.reuse);
+}
+function drawStrip(c, marks) {                // i tagli lungo la canzone: si alternano due colori
+  const w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"), cs = getComputedStyle(document.body), end = marks[marks.length - 1] || 1;
+  g.scale(dpr, dpr);
+  let prev = 0;
+  marks.forEach((m, i) => {
+    g.fillStyle = cs.getPropertyValue(i % 2 ? "--stripA" : "--stripB").trim();
+    g.fillRect(prev / end * w, 0, Math.max(1, (m - prev) / end * w + 0.5), h);
+    prev = m;
+  });
+}
+function renderPresets() {
+  const ps = ST.presets || [];
+  const sig = JSON.stringify(ps.map(p => [p.key, p.n, p.marks[p.marks.length - 1]])) + document.body.dataset.look;
+  if (sig !== presetSig) {
+    presetSig = sig;
+    const box = $("presets");
+    box.innerHTML = ps.length ? "" : "<div class='hint'>Analizza clip e canzone per vedere le proposte.</div>";
+    for (const p of ps) {
+      const el = document.createElement("div");
+      el.className = "preset";
+      el.innerHTML = "<div class='pname'>" + esc(p.name) + "</div><div class='pdesc'>" + esc(p.desc) + "</div>" +
+        "<canvas class='strip'></canvas><div class='pstats'><b>" + p.n + "</b> stacchi · media <b>" +
+        p.avg.toFixed(1).replace(".", ",") + " s</b> · " + esc(p.ord.toLowerCase()) + "</div>" +
+        "<div class='pbtns'><button class='btn' data-c='preset_edit'>◆ Apri nell'editor</button>" +
+        "<button class='btn primary' data-c='preset_make'>▶ Monta questa</button></div>";
+      for (const b of el.querySelectorAll("button")) b.onclick = () => cmd(b.dataset.c, p.key);
+      box.appendChild(el);
+      drawStrip(el.querySelector("canvas"), p.marks);
+    }
+  }
+  for (const b of $("presets").querySelectorAll("button")) b.disabled = !!ST.busy;
+}
+window.addEventListener("resize", () => { presetSig = ""; if (ST) renderPresets(); });
 function setLook(l) {
   document.body.className = "look-" + l;
   document.body.dataset.look = l;
@@ -2694,7 +2856,9 @@ function render() {
     $(id).classList.toggle("working", ST.busy === c);
   }
   for (const id of ["bAnalyze"]) if (!ST.busy) $(id).disabled = !(v.length && ST.sel.song);
-  for (const id of ["bFit", "bMark", "bMake"]) if (!ST.busy) $(id).disabled = !inf.analyzed;
+  for (const id of ["bFit", "bMark", "bMake", "bAll"]) if (!ST.busy) $(id).disabled = !inf.analyzed;
+  renderPresets();
+  syncControls();
 }
 async function poll() {
   try {
@@ -2737,13 +2901,13 @@ def main():
     started = time.time()
     while not STATE["quit"]:
         try:
-            cmd = CMDQ.get(timeout=0.25)
+            cmd, arg = CMDQ.get(timeout=0.25)
         except queue.Empty:
-            cmd = None
+            cmd, arg = None, None
         if cmd in CMDS:
             STATE["busy"] = cmd
             try:
-                CMDS[cmd](None)
+                CMDS[cmd](arg)
             except Exception as e:      # mai piu' finestre bloccate: l'errore va nel log
                 import traceback
                 set_log("ERRORE durante '%s':\n%s" % (cmd, traceback.format_exc()[-1800:]))

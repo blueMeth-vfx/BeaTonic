@@ -91,7 +91,22 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
    - **Sensibilità scene**: *Media* è la consigliata; *Alta* trova più divisioni;
      *Bassa* tiene solo gli stacchi e i cambi più netti.
    - **Non dividere (clip intere)**: ogni video resta un pezzo unico.
-4. Scegli **stile**, **formato**, **durata** e l'**ordine** delle clip:
+4. **Proposte di montaggio**: appena analizzato, BeaTonic propone **tre montaggi diversi**
+   della stessa canzone, con una striscia che mostra dove cadono i tagli:
+
+   | Proposta | Taglio | Clip |
+   |---|---|---|
+   | **Energia** | ogni beat dove la canzone spinge, mezza battuta altrove | mischiate |
+   | **Groove** | sull'1 e sul 3 della battuta, ogni beat solo nei punti più forti | in ordine di nome |
+   | **Cinematico** | un'inquadratura per battuta, due nelle parti calme | in ordine di selezione |
+
+   Per ognuna: **Apri nell'editor** (per ritoccarla, poi Monta) o **Monta questa**.
+   **Monta tutte e 3** crea tre timeline (`BeaTonic_Energia`, `_Groove`, `_Cinematico`)
+   da confrontare in Resolve.
+
+   ![Proposte di montaggio](docs/proposte_notte.png)
+
+   **Oppure personalizza**: scegli **stile**, **formato**, **durata** e l'**ordine** delle clip:
 
    | Ordine | Cosa fa |
    |---|---|
