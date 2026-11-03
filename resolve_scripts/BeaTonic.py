@@ -1865,14 +1865,22 @@ FIT_XFADE = 0.06          # s: dissolvenza sul punto di salto
 FIT_TEMPO = 0.025         # correzione di tempo massima per la durata esatta (2,5%)
 
 
-def _audio_info(path):
-    """(durata s, fine della musica s: senza il silenzio in coda)."""
-    p = subprocess.run([FFMPEG, "-hide_banner", "-i", path, "-af",
-                        "silencedetect=n=-50dB:d=0.7", "-f", "null", "-"],
-                       capture_output=True, text=True, creationflags=_NOWIN)
-    txt = p.stderr or ""
+def _audio_info(path, known=0.0):
+    """(durata s, fine della musica s: senza il silenzio in coda).
+    L'output di ffmpeg si legge in BYTE: con text=True la codifica di Windows (cp1252)
+    si rompe sui tag delle canzoni e il testo arriva vuoto senza nessun errore."""
+    try:
+        p = subprocess.run([FFMPEG, "-hide_banner", "-i", path, "-vn", "-af",
+                            "silencedetect=n=-50dB:d=0.7", "-f", "null", "-"],
+                           capture_output=True, stdin=subprocess.DEVNULL,
+                           timeout=600, creationflags=_NOWIN)
+        txt = (p.stderr or b"").decode("utf-8", "replace")
+    except Exception:
+        txt = ""
     m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", txt)
     dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+    if dur <= 0:                         # durata illeggibile: quella gia' nota dall'analisi
+        return known, known
     st = re.findall(r"silence_start: ([\d.]+)", txt)
     en = re.findall(r"silence_end: ([\d.]+)", txt)
     end = dur
@@ -1965,9 +1973,10 @@ def _bar_dist(feats, bars):
 def fit_plan(beats, bpos, feats, song_end, target):
     """Sceglie dove saltare. Ritorna {segs: [(da, a)], length, jumps: [(da, a, somiglianza)],
     exact} oppure None. Prova 1 e 2 salti e tiene quelli che si sentono meno."""
-    bars = [i for i, p in enumerate(bpos) if p == 0 and i + 4 <= len(feats)]
+    bars = [i for i, p in enumerate(bpos) if p == 0 and i + 4 <= len(feats)
+            and beats[i] < song_end - 0.5]
     nb = len(bars)
-    if nb < 12 or target <= 0:
+    if nb < 12 or target <= 0 or song_end <= 0:
         return None
     T = [beats[i] for i in bars]
     D = _bar_dist(feats, bars)
@@ -2068,11 +2077,19 @@ def render_fit(src, plan, target, out):
     if 0.0005 < abs(ratio - 1.0) <= FIT_TEMPO:
         fc.append("[%s]atempo=%.6f[out]" % (last, ratio))
         last, length = "out", target
-    p = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", src, "-filter_complex", ";".join(fc),
-                        "-map", "[%s]" % last, "-c:a", "pcm_s24le", out],
-                       capture_output=True, text=True, creationflags=_NOWIN)
+    for s, e in segs:                    # mai un pezzo che finisce prima di cominciare
+        if e - s < 0.05:
+            raise RuntimeError("piano non valido: pezzo %.2f-%.2f s" % (s, e))
+    try:
+        p = subprocess.run([FFMPEG, "-y", "-v", "error", "-i", src, "-vn",
+                            "-filter_complex", ";".join(fc), "-map", "[%s]" % last,
+                            "-c:a", "pcm_s24le", out],
+                           capture_output=True, stdin=subprocess.DEVNULL,
+                           timeout=max(120.0, 3.0 * length), creationflags=_NOWIN)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg non ha finito in tempo (fermato).")
     if p.returncode != 0 or not os.path.exists(out):
-        raise RuntimeError((p.stderr or "ffmpeg")[-300:])
+        raise RuntimeError((p.stderr or b"ffmpeg").decode("utf-8", "replace")[-300:])
     return length
 
 
@@ -2350,7 +2367,9 @@ def on_fit(ev):
     old = SONG.GetName()
     set_status("Adatto la canzone a %.1f s…" % target)
     set_log("Adatto «%s» a %.1f s: confronto armonia, timbro e battute…" % (old, target))
-    dur, end = _audio_info(src)
+    dur, end = _audio_info(src, SONG_LEN[0])
+    if end <= 1.0:
+        set_log("Non riesco a leggere la durata di «%s»." % old); return
     feats = _beat_feats(src, BEATS)
     plan = fit_plan(BEATS, BPOS, feats, end, target)
     if not plan:
