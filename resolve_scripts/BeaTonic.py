@@ -684,7 +684,7 @@ td { padding: 3px 14px 3px 0; vertical-align: top; }
     <aside id="prev">
       <div id="prevHead"><b>Anteprima del montato</b>
         <select id="prevMode" title="Clip: le clip vere che verranno montate. Bianco/nero: si alterna a ogni cambio clip">
-          <option value="clip">Clip</option><option value="bn">Bianco / nero</option></select></div>
+          <option value="bn" selected>Bianco / nero</option><option value="clip">Clip</option></select></div>
       <div id="prevBox"><canvas id="pv"></canvas></div>
       <div id="prevInfo">—</div>
     </aside>
@@ -2117,8 +2117,61 @@ def _load_settings():
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
-SEED = [0]          # ordine casuale fisso per analisi: anteprima dell'editor = montaggio
+SEED = [int(time.time() * 1000) & 0x7fffffff]   # ordine casuale fisso: anteprima = montaggio
 SONG_LEN = [0.0]    # durata della canzone in uso (s)
+FITTED = {}         # canzone adattata in uso: orig_item, orig (file), orig_name, item, path
+SHOT_CACHE = {}     # (file clip, sensibilita') -> ([(in, out)], n stacchi, n cambi inquadratura)
+BEAT_CACHE = {}     # file canzone -> (bpm, beats, bpos, intens, durata)
+
+
+def _path(c):
+    try:
+        return c.GetClipProperty("File Path") or c.GetName()
+    except Exception:
+        return ""
+
+
+def _song_beats(item):
+    """Beat della canzone: dalla memoria se l'ho gia' analizzata."""
+    p = _path(item)
+    if p not in BEAT_CACHE:
+        bpm, beats, bpos, intens = beat_grid(p)
+        BEAT_CACHE[p] = (bpm, beats, bpos, intens, _wav_dur(os.path.join(_TMP, "_song.wav")))
+    return BEAT_CACHE[p]
+
+
+def _use_song(item, analyze=False):
+    """Canzone in uso + la sua analisi (se c'e'). Se cambia canzone, i marker ripartono."""
+    global SONG, BPM, BEATS, BPOS, INTENS
+    same = SONG is not None and item is not None and _path(SONG) == _path(item)
+    SONG = item
+    if not same:
+        MARKS[:] = []
+        SESSION[0] = "%x" % int(time.time() * 1000)
+    data = None
+    if item is not None:
+        data = _song_beats(item) if analyze else BEAT_CACHE.get(_path(item))
+    if data:
+        BPM, BEATS, BPOS, INTENS, SONG_LEN[0] = data
+    elif not same:
+        BPM, BEATS, BPOS, INTENS, SONG_LEN[0] = 0.0, [], [], [], 0.0
+    STATE["sel"] = {"videos": STATE["sel"]["videos"], "song": item.GetName() if item else ""}
+
+
+def _sync_shots():
+    """Pezzi video delle clip selezionate presi dalla memoria; False se qualcuna e' da analizzare."""
+    global SHOTS
+    key = str(SENS.get(SET["sens"]))
+    out = []
+    for c in VIDEOS:
+        hit = SHOT_CACHE.get((_path(c), key))
+        if hit is None:
+            SHOTS = []
+            return False
+        fps = _clip_fps(c)
+        out += [{"clip": c, "fps": fps, "in": a, "out": b} for a, b in hit[0]]
+    SHOTS = out
+    return True
 
 
 def set_status(m):
@@ -2136,26 +2189,34 @@ def _state():
     return {"sel": STATE["sel"], "set": SET, "log": STATE["log"], "status": STATE["status"],
             "busy": STATE["busy"], "quit": STATE["quit"],
             "opts": {"sens": list(SENS), "style": list(STYLES), "fmt": list(FORMATS), "ord": list(ORDERS)},
-            "info": {"analyzed": bool(BEATS), "shots": len(SHOTS), "bpm": BPM, "beats": len(BEATS),
-                     "bars": sum(1 for p in BPOS if p == 0), "song_len": SONG_LEN[0],
-                     "fitted": "BeaTonic" in (STATE["sel"]["song"] or ""),
+            "info": {"analyzed": bool(BEATS and SHOTS), "shots": len(SHOTS), "bpm": BPM,
+                     "beats": len(BEATS), "bars": sum(1 for p in BPOS if p == 0),
+                     "song_len": SONG_LEN[0], "fitted": bool(FITTED),
+                     "orig": FITTED.get("orig_name", ""),
                      "marks": len(saved) if saved is not None else len(MARKS)}}
 
 
 def on_refresh(ev=None):
-    global VIDEOS, SONG
-    VIDEOS, SONG = selection()
-    STATE["sel"] = {"videos": [c.GetName() for c in VIDEOS], "song": SONG.GetName() if SONG else ""}
-    set_status("Selezione: %d clip video · canzone: %s" % (len(VIDEOS), SONG.GetName() if SONG else "nessuna"))
+    """Rilegge la selezione del Media Pool. Se ho adattato la canzone, resta in uso la
+    versione adattata finche' non selezioni una canzone DIVERSA dall'originale."""
+    global VIDEOS
+    VIDEOS, sel = selection()
+    song = sel
+    if FITTED and (sel is None or _path(sel) in (FITTED["orig"], FITTED["path"])):
+        song = FITTED["item"]
+    elif FITTED:
+        FITTED.clear()                   # hai scelto un'altra canzone
+    STATE["sel"] = {"videos": [c.GetName() for c in VIDEOS], "song": ""}
+    _use_song(song)
+    _sync_shots()
+    set_status("Selezione: %d clip video · canzone: %s%s" % (
+        len(VIDEOS), song.GetName() if song else "nessuna", " (adattata)" if FITTED else ""))
     if not FFMPEG:
         set_log("ffmpeg NON trovato. Installalo o imposta la variabile FFMPEG col percorso.")
 
 
 def on_analyze(ev):
-    global SHOTS, BEATS, BPOS, BPM, INTENS
-    MARKS[:] = []                        # nuova analisi: i marker vecchi non valgono piu'
-    SESSION[0] = "%x" % int(time.time() * 1000)
-    SEED[0] = int(time.time() * 1000) & 0x7fffffff
+    """Analizza solo quello che non ho gia' analizzato (clip e canzone restano in memoria)."""
     on_refresh()
     if not FFMPEG:
         set_log("ffmpeg non trovato: impossibile analizzare."); return
@@ -2164,19 +2225,28 @@ def on_analyze(ev):
     if not SONG:
         set_log("Nessuna canzone (clip audio) selezionata nel Media Pool."); return
     params = SENS.get(SET["sens"], SENS["Media (consigliata)"])
-    split = params is not None
-    SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
-    set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
-    BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
-    SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav"))
+    split, key = params is not None, str(params)
+    todo = [c for c in VIDEOS if (_path(c), key) not in SHOT_CACHE]
+    for i, c in enumerate(todo, 1):
+        set_log("Analisi scene %d/%d: %s…" % (i, len(todo), c.GetName()))
+        sh, nc, nr = build_shots([c], params, lambda m: None)
+        SHOT_CACHE[(_path(c), key)] = ([(s["in"], s["out"]) for s in sh], nc, nr)
+    _sync_shots()
+    n_cut = sum(SHOT_CACHE[(_path(c), key)][1] for c in VIDEOS)
+    n_ref = sum(SHOT_CACHE[(_path(c), key)][2] for c in VIDEOS)
+    if not BEATS:
+        set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
+        _use_song(SONG, analyze=True)
     bars = sum(1 for p in BPOS if p == 0)
-    set_log("ANALISI FATTA.\n• %d pezzi video da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
+    reused = len(VIDEOS) - len(todo)
+    set_log("ANALISI FATTA.\n• %d pezzi video da %d clip (%s)%s.\n• Canzone%s: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
             "Ora scegli stile, formato, durata e ordine. Puoi adattare la canzone alla durata "
             "e aprire l'editor dei marker, oppure premere direttamente 'Monta'."
             % (len(SHOTS), len(VIDEOS),
                ("%d stacchi + %d cambi d'inquadratura" % (n_cut, n_ref)) if split else "intere",
-               BPM, len(BEATS), bars, MIN_CUT))
+               (" — %d già analizzate, riusate" % reused) if reused else "",
+               " adattata" if FITTED else "", BPM, len(BEATS), bars, MIN_CUT))
     set_status("Analisi ok: %d pezzi video · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
@@ -2228,19 +2298,20 @@ def on_mark(ev):
 def on_fit(ev):
     """Adatta la canzone alla durata scelta (inizio e finale veri, salti dove non si
     sentono), la importa nel Media Pool e la usa da qui in poi."""
-    global SONG, BPM, BEATS, BPOS, INTENS
     if not BEATS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     target = _dur()
-    src = SONG.GetClipProperty("File Path") or ""
-    old = SONG.GetName()
+    orig = FITTED.get("orig_item") or SONG   # riadattando si riparte SEMPRE dall'originale
+    src = _path(orig)
+    old = orig.GetName()
     set_status("Adatto la canzone a %.1f s…" % target)
     set_log("Adatto «%s» a %.1f s: confronto armonia, timbro e battute…" % (old, target))
-    dur, end = _audio_info(src, SONG_LEN[0])
+    o_bpm, o_beats, o_bpos, o_int, o_len = _song_beats(orig)
+    dur, end = _audio_info(src, o_len)
     if end <= 1.0:
         set_log("Non riesco a leggere la durata di «%s»." % old); return
-    feats = _beat_feats(src, BEATS)
-    plan = fit_plan(BEATS, BPOS, feats, end, target)
+    feats = _beat_feats(src, o_beats)
+    plan = fit_plan(o_beats, o_bpos, feats, end, target)
     if not plan:
         set_log("Non riesco ad adattare questa canzone (troppe poche battute riconosciute)."); return
     name = "%s - BeaTonic %ss.wav" % (os.path.splitext(os.path.basename(src))[0], "%g" % round(target, 2))
@@ -2260,12 +2331,10 @@ def on_fit(ev):
         items = None
     if not items:
         set_log("Canzone adattata creata ma non importata nel Media Pool:\n%s" % out); return
-    SONG = items[0]
-    STATE["sel"] = {"videos": STATE["sel"]["videos"], "song": SONG.GetName()}
-    BPM, BEATS, BPOS, INTENS = beat_grid(out)
-    SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav")) or length
-    MARKS[:] = []
-    SESSION[0] = "%x" % int(time.time() * 1000)
+    FITTED.clear()
+    FITTED.update(orig_item=orig, orig=src, orig_name=old, item=items[0], path=out)
+    BEAT_CACHE.pop(_path(items[0]), None)  # file appena riscritto: va rianalizzato
+    _use_song(items[0], analyze=True)      # le clip analizzate restano, cambia solo la canzone
     mm = lambda t: "%d:%04.1f" % (int(t // 60), t % 60)
     how = lambda s: ("taglio invisibile" if s >= 0.85 else
                      "dissolvenza a tempo di 1 beat" if s >= 0.7 else "dissolvenza a tempo di 2 beat")
@@ -2288,10 +2357,23 @@ def on_fit(ev):
     if not feats or not feats[0][0]:
         lines.append("• Confronto senza armonia (manca numpy in Python): meno preciso. "
                      "Installa numpy per salti migliori.")
-    lines.append("\nRiascoltala: se rifai 'Analizza', seleziona nel Media Pool la canzone "
-                 "adattata (non l'originale «%s»)." % old)
+    lines.append("\nLe clip già analizzate restano. Da ora Analizza e Aggiorna selezione usano "
+                 "questa versione finché non selezioni un'altra canzone; per tornare "
+                 "all'originale «%s» premi 'usa l'originale'." % old)
     set_log("\n".join(lines))
     set_status("Canzone adattata a %.2f s." % length)
+
+
+def on_unfit(ev=None):
+    """Torna alla canzone originale (la sua analisi e' gia' in memoria)."""
+    if not FITTED:
+        return
+    orig = FITTED["orig_item"]
+    FITTED.clear()
+    _use_song(orig, analyze=True)
+    set_log("Torno alla canzone originale «%s» (%d:%02d)." % (
+        orig.GetName(), int(SONG_LEN[0] // 60), int(SONG_LEN[0] % 60)))
+    set_status("Canzone originale in uso.")
 
 
 def on_make(ev):
@@ -2322,8 +2404,8 @@ def on_close(ev=None):
     STATE["quit"] = True
 
 
-CMDS = {"refresh": on_refresh, "analyze": on_analyze, "fit": on_fit, "mark": on_mark,
-        "make": on_make, "quit": on_close}
+CMDS = {"refresh": on_refresh, "analyze": on_analyze, "fit": on_fit, "unfit": on_unfit,
+        "mark": on_mark, "make": on_make, "quit": on_close}
 
 MAIN_HTML = r"""<!doctype html>
 <html lang="it">
@@ -2451,6 +2533,9 @@ label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: 
 .btn.working::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent); animation: sh 1.1s infinite; }
 @keyframes sh { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
+.link { all: unset; cursor: pointer; margin-top: 4px; font-size: 12px; font-weight: 700; color: var(--head); }
+.link:hover { text-decoration: underline; }
+.link[hidden] { display: none; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
 .chip { padding: 4px 10px; border-radius: 999px; background: var(--tile); border: var(--bd2); font-size: 12px; color: var(--muted); }
 .chip b { font-size: 14px; color: var(--fg); }
@@ -2483,7 +2568,8 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
     <h2><span class="n">1</span> Materiale dal Media Pool</h2>
     <div class="tiles">
       <div class="tile"><div class="k">Clip video</div><div class="v" id="nVid">0</div><div class="sub" id="vidNames">—</div></div>
-      <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div></div>
+      <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div>
+        <button class="link" id="bUnfit" hidden title="Torna alla canzone originale (la sua analisi è già in memoria)">↺ usa l'originale</button></div>
     </div>
     <button class="btn" id="bRefresh" title="Rilegge le clip e la canzone selezionate nel Media Pool">↻ Aggiorna selezione</button>
   </section>
@@ -2530,8 +2616,9 @@ pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; f
 "use strict";
 const $ = id => document.getElementById(id);
 const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene delle clip e beat della canzone…",
-  fit: "Adatto la canzone alla durata…", mark: "Apro l'editor dei marker…", make: "Monto la timeline in Resolve…", quit: "Chiudo…"};
-const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", mark: "bMark", make: "bMake", quit: "bQuit"};
+  fit: "Adatto la canzone alla durata…", unfit: "Torno alla canzone originale…", mark: "Apro l'editor dei marker…",
+  make: "Monto la timeline in Resolve…", quit: "Chiudo…"};
+const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", unfit: "bUnfit", mark: "bMark", make: "bMake", quit: "bQuit"};
 let ST = null, inited = false, lastLog = null, fails = 0, closing = false;
 const esc = s => String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
 const split = s => { const m = /^(.*?)\s*\((.*)\)\s*$/.exec(s); return m ? [m[1], m[2]] : [s, ""]; };
@@ -2590,8 +2677,10 @@ function render() {
   $("nVid").textContent = v.length;
   $("vidNames").textContent = v.length ? v.slice(0, 3).join(" · ") + (v.length > 3 ? " +" + (v.length - 3) : "") : "selezionale nel Media Pool";
   $("songName").textContent = ST.sel.song || "—";
-  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata alla durata" : "") : "da analizzare")
+  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata · originale: " + inf.orig : "")
+                                                          : "da analizzare")
                                           : "selezionala nel Media Pool";
+  $("bUnfit").hidden = !inf.fitted;
   $("chips").innerHTML = inf.analyzed ?
     ["<b>" + inf.shots + "</b> pezzi video", "<b>" + Math.round(inf.bpm) + "</b> BPM", "<b>" + inf.bars + "</b> battute", "<b>" + inf.beats + "</b> beat"]
       .map(x => "<span class='chip'>" + x + "</span>").join("") : "<span class='chip'>non ancora analizzato</span>";

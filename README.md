@@ -83,7 +83,8 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
 1. Nel **Media Pool** seleziona le **clip video** (le sorgenti) **+ la canzone**
    (una clip audio).
 2. **Aggiorna selezione** → controlla che veda N clip + la canzone.
-3. **Analizza**: ffmpeg trova i cambi di scena e i beat.
+3. **Analizza**: ffmpeg trova i cambi di scena e i beat. Clip e canzoni già analizzate
+   restano in memoria: rifare Analizza è istantaneo (rianalizza solo le novità).
    *(È l'operazione lenta: la finestra resta ferma mentre lavora.)*
    - Le clip vengono divise sia agli **stacchi** veri sia ai **cambi d'inquadratura**
      dentro una ripresa continua (la camera si sposta su un altro soggetto).
@@ -112,6 +113,10 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
    - Crea `<canzone> - BeaTonic 30s.wav` accanto all'originale, lo importa nel Media
      Pool e lo usa da subito per Marker e Monta. Nel log: cosa ha tolto o ripetuto e
      quanto si somigliano i punti di salto.
+   - Le **clip già analizzate restano**: la canzone in uso diventa quella adattata e ci
+     rimane anche se rifai Analizza o Aggiorna selezione (finché non selezioni
+     un'altra canzone). **↺ usa l'originale** torna indietro; riadattando a un'altra
+     durata si riparte sempre dall'originale.
    - Per confrontare l'**armonia** serve `numpy` nel Python che usa Resolve (di solito
      c'è); senza, confronta solo ritmo ed energia ed è meno preciso.
 6. **◆ Marker** *(facoltativo, consigliato)* → si apre l'**editor dei marker** in una
@@ -120,11 +125,11 @@ Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
    marker è un cambio clip** — partendo dai punti di taglio dello stile scelto.
    **Cambiando stile o durata nell'editor i marker si rifanno subito** (Ctrl+Z per tornare).
 
-   **Anteprima del montato** (riquadro a destra, `P`): mostra le **clip vere** che verranno
+   **Anteprima del montato** (riquadro a destra, `P`): di base **bianco / nero** che si alterna a ogni
+   cambio clip; oppure le **clip vere** che verranno
    montate, nell'ordine e nei pezzi che userà Monta, nel formato scelto (16:9 / 9:16).
    Segue il mouse quando passi sull'onda e il cursore mentre suona, con un lampo a ogni
-   cambio clip. In alternativa **Bianco / nero**: si alterna a ogni cambio clip, per
-   vedere il ritmo dei tagli.
+   cambio clip.
 
    | Mouse | |
    |---|---|
