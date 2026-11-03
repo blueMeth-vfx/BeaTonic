@@ -68,6 +68,18 @@ condivisa con PlutoniCut.
 
 ## Come si usa
 
+Da **Workspace ▸ Scripts ▸ Utility ▸ BeaTonic** si apre il pannello in una **finestra a
+parte** (Chrome o Edge in modalità app, col logo Plutonic nella barra delle
+applicazioni): ridimensionabile, sempre reattiva anche mentre analizza o monta, con
+l'avanzamento in diretta. Gira solo sul tuo computer; chiudendo le finestre di BeaTonic
+il plugin si chiude da solo. Le impostazioni vengono ricordate.
+
+Tre aspetti a scelta (in alto a destra): **Studio**, **Labs**, **Notte**.
+
+| Studio | Labs | Notte |
+|---|---|---|
+| ![Studio](docs/pannello_studio.png) | ![Labs](docs/pannello_labs.png) | ![Notte](docs/pannello_notte.png) |
+
 1. Nel **Media Pool** seleziona le **clip video** (le sorgenti) **+ la canzone**
    (una clip audio).
 2. **Aggiorna selezione** → controlla che veda N clip + la canzone.

@@ -17,6 +17,7 @@ Richiede ffmpeg (rilevato in automatico). Self-contained, zero dipendenze Python
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import socket
@@ -27,6 +28,15 @@ import threading
 import time
 import urllib.request
 import wave
+
+try:
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+except ImportError:                      # Python < 3.7
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import ThreadingMixIn
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 
 _LOGO = os.path.join(os.environ.get("APPDATA", ""), "Blackmagic Design",
                      "DaVinci Resolve", "Support", "Fusion", "Scripts", "Utility",
@@ -41,13 +51,6 @@ except NameError:
     import DaVinciResolveScript as _dvr
     resolve = _dvr.scriptapp("Resolve")
 
-fusion = resolve.Fusion()
-ui = fusion.UIManager
-try:
-    disp = bmd.UIDispatcher(ui)
-except NameError:
-    import fusionscript as bmd
-    disp = bmd.UIDispatcher(ui)
 
 _NOWIN = 0x08000000 if os.name == "nt" else 0   # niente console che lampeggia
 
@@ -414,7 +417,7 @@ MIN_SCENE = 0.6   # s: due stacchi piu' vicini di cosi' -> si tiene il piu' nett
 MIN_TAKE = 3.0    # s: un cambio d'inquadratura crea pezzi lunghi almeno cosi'
 SENS = {          # (stacco: quanto spicca, minimo | inquadratura: quanto spicca, minimo)
     "Media (consigliata)": (3.0, 0.06, 2.5, 20.0),
-    "Alta (trova di piu')": (2.2, 0.035, 2.0, 12.0),
+    "Alta (trova di più)": (2.2, 0.035, 2.0, 12.0),
     "Bassa (solo stacchi netti)": (4.5, 0.10, 3.0, 30.0),
     "Non dividere (clip intere)": None,
 }
@@ -571,138 +574,21 @@ def _put_song(mp, song, ns, frames=None):
 
 
 # --------------------------------------------------------------------------
-# Editor dei marker: una finestra a parte (Chrome/Edge in modalita' "app", oppure
-# il browser predefinito) servita da un piccolo server SOLO su questo computer.
+# Finestre a parte (Chrome/Edge in modalita' "app", oppure il browser predefinito)
+# servite da un piccolo server DENTRO il plugin, SOLO su questo computer.
 # Disegno fluido, trascinamento, zoom, scrub audio al passaggio del mouse, marker
 # trascinabili. I marker si salvano da soli in markers.json; "Monta" li legge.
 # --------------------------------------------------------------------------
 WEB = os.path.join(_TMP, "editor")
-EDITOR = {"proc": None, "port": None}
 SESSION = [""]            # cambia a ogni Analizza: i marker vecchi non valgono piu'
 BROWSER_AUDIO = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
-
-SERVER_PY = r'''
-import json, os, shutil, sys, threading, time
-try:
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-except ImportError:
-    from http.server import BaseHTTPRequestHandler, HTTPServer
-    from socketserver import ThreadingMixIn
-
-    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-        daemon_threads = True
-
-MIME = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
-        ".ogg": "audio/ogg", ".flac": "audio/flac", ".png": "image/png"}
-
-
-def run(root, port, standalone=False):
-    last = [time.time()]
-
-    def sess():
-        with open(os.path.join(root, "session.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    locks = {}
-
-    def sprite(i):
-        """Miniature di una clip in UN'immagine a mosaico (per l'anteprima del montato),
-        create con ffmpeg la prima volta che servono."""
-        s = sess()
-        c = s["clips"][i]
-        out = os.path.join(root, "thumb_%s_%d.jpg" % (s["session"], i))
-        with locks.setdefault(i, threading.Lock()):
-            if not os.path.exists(out):
-                import subprocess
-                vf = ("fps=%g,scale='if(gt(iw,ih),200,-2)':'if(gt(iw,ih),-2,200)',tile=%dx%d"
-                      % (c["f"], c["cols"], c["rows"]))
-                subprocess.run([s["ffmpeg"], "-y", "-v", "error", "-i", c["path"], "-an", "-vf", vf,
-                                "-frames:v", "1", "-q:v", "5", out + ".tmp.jpg"],
-                               capture_output=True, creationflags=0x08000000 if os.name == "nt" else 0)
-                if os.path.exists(out + ".tmp.jpg"):
-                    os.replace(out + ".tmp.jpg", out)
-        return out
-
-    class H(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def _head(self, code, ctype, n):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(n))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-
-        def _bytes(self, data, ctype="text/plain", code=200):
-            self._head(code, ctype, len(data))
-            self.wfile.write(data)
-
-        def _file(self, p, ctype):
-            try:
-                n = os.path.getsize(p)
-            except OSError:
-                return self._bytes(b"not found", code=404)
-            self._head(200, ctype, n)
-            with open(p, "rb") as f:
-                shutil.copyfileobj(f, self.wfile, 1 << 20)
-
-        def do_GET(self):
-            last[0] = time.time()
-            p = self.path.split("?")[0]
-            try:
-                if p in ("/", "/index.html"):
-                    self._file(os.path.join(root, "editor.html"), "text/html; charset=utf-8")
-                elif p == "/session":
-                    self._file(os.path.join(root, "session.json"), "application/json")
-                elif p == "/song":
-                    s = sess()["song_path"]
-                    self._file(s, MIME.get(os.path.splitext(s)[1].lower(), "application/octet-stream"))
-                elif p == "/logo":
-                    self._file(sess().get("logo") or "", "image/png")
-                elif p.startswith("/thumb/"):
-                    self._file(sprite(int(p.split("/")[2])), "image/jpeg")
-                elif p == "/ping":
-                    self._bytes(b"ok")
-                else:
-                    self._bytes(b"not found", code=404)
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                pass
-
-        def do_POST(self):
-            last[0] = time.time()
-            n = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(n) if n else b""
-            name = {"/markers": "markers.json", "/done": "done.json"}.get(self.path.split("?")[0])
-            if not name:
-                return self._bytes(b"not found", code=404)
-            tmp = os.path.join(root, name + ".tmp")
-            with open(tmp, "wb") as f:
-                f.write(body)
-            os.replace(tmp, os.path.join(root, name))
-            self._bytes(b"ok")
-
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    if standalone:                 # si chiude da solo quando BeaTonic si chiude
-        def watch():
-            while True:
-                time.sleep(15)
-                if (not os.path.exists(os.path.join(root, "alive"))
-                        or time.time() - last[0] > 4 * 3600):
-                    os._exit(0)
-        threading.Thread(target=watch, daemon=True).start()
-    srv.serve_forever()
-
-
-if __name__ == "__main__":
-    run(sys.argv[1], int(sys.argv[2]), True)
-'''
 
 EDITOR_HTML = r"""<!doctype html>
 <html lang="it">
 <head>
 <meta charset="utf-8">
 <title>BeaTonic · Marker</title>
+<link rel="icon" id="fav" href="/logo">
 <style>
 :root {
   --bg: #0f1115; --panel: #111827; --ruler: #0b0d11; --line: #1f2937; --fg: #e5e7eb;
@@ -1548,89 +1434,152 @@ async function boot() {
   requestAnimationFrame(frame);
 }
 boot();
+setInterval(() => fetch("/api/ping").catch(() => {}), 4000);   // "sono aperto": BeaTonic resta vivo
+(function favicon() {                         // logo Plutonic quadrato: icona della finestra e della barra
+  const im = new Image();
+  im.onload = () => {
+    const c = document.createElement("canvas"), g = c.getContext("2d");
+    c.width = c.height = 128;
+    const s = Math.min(128 / im.width, 128 / im.height);
+    g.drawImage(im, (128 - im.width * s) / 2, (128 - im.height * s) / 2, im.width * s, im.height * s);
+    $("fav").href = c.toDataURL("image/png");
+  };
+  im.src = "/logo";
+})();
 </script>
 </body>
 </html>
 """
 
 
-def _find_python():
-    """Python del sistema per il server dell'editor (non l'eseguibile di Resolve)."""
-    exe = "python.exe" if os.name == "nt" else os.path.join("bin", "python3")
-    for base in (getattr(sys, "base_prefix", ""), sys.prefix, getattr(sys, "exec_prefix", "")):
-        if base and os.path.exists(os.path.join(base, exe)):
-            return os.path.join(base, exe)
-    for name in ("python3", "python", "py"):
-        p = shutil.which(name)
-        if p:
-            return p
-    return None
+SESS = {}                 # sessione dell'editor (beat, marker, clip...) servita a /session
+STATE = {"log": "", "status": "Pronto.", "busy": "", "quit": False, "pinged": 0.0,
+         "sel": {"videos": [], "song": ""}}
+CMDQ = queue.Queue()      # comandi dalla finestra, eseguiti dal plugin uno alla volta
+SERVER = {"srv": None, "port": None}
+MIME = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac",
+        ".ogg": "audio/ogg", ".flac": "audio/flac"}
+_sprite_locks = {}
 
 
-def _ping(port):
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/ping" % port, timeout=0.4) as r:
-            return r.read() == b"ok"
-    except Exception:
-        return False
+def _sprite(i):
+    """Miniature di una clip in UN'immagine a mosaico (anteprima del montato),
+    create con ffmpeg la prima volta che servono."""
+    c = SESS["clips"][i]
+    out = os.path.join(WEB, "thumb_%s_%d.jpg" % (SESS["session"], i))
+    with _sprite_locks.setdefault(i, threading.Lock()):
+        if not os.path.exists(out):
+            vf = ("fps=%g,scale='if(gt(iw,ih),200,-2)':'if(gt(iw,ih),-2,200)',tile=%dx%d"
+                  % (c["f"], c["cols"], c["rows"]))
+            subprocess.run([FFMPEG, "-y", "-v", "error", "-i", c["path"], "-an", "-vf", vf,
+                            "-frames:v", "1", "-q:v", "5", out + ".tmp.jpg"],
+                           capture_output=True, stdin=subprocess.DEVNULL, timeout=600,
+                           creationflags=_NOWIN)
+            if os.path.exists(out + ".tmp.jpg"):
+                os.replace(out + ".tmp.jpg", out)
+    return out
 
 
-def _start_server():
-    """Avvia (o riusa) il server locale dell'editor. Ritorna la porta o None."""
-    if EDITOR["port"] and _ping(EDITOR["port"]):
-        return EDITOR["port"]
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    with open(os.path.join(WEB, "alive"), "w") as f:
-        f.write("1")
-    ok = False
-    py = _find_python()
-    if py:
-        try:
-            EDITOR["proc"] = subprocess.Popen(
-                [py, os.path.join(WEB, "bt_server.py"), WEB, str(port)], cwd=WEB,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, creationflags=_NOWIN)
-            for _ in range(50):
-                if _ping(port):
-                    ok = True
-                    break
-                time.sleep(0.1)
-        except Exception:
-            ok = False
-    if not ok:                         # ripiego: server dentro al plugin
-        g = {"__name__": "bt_server"}
-        exec(SERVER_PY, g)
-        threading.Thread(target=g["run"], args=(WEB, port), daemon=True).start()
-        for _ in range(30):
-            if _ping(port):
-                ok = True
-                break
-            time.sleep(0.1)
-    EDITOR["port"] = port if ok else None
-    return EDITOR["port"]
+class _Handler(BaseHTTPRequestHandler):
+    """Server SOLO su 127.0.0.1: pannello (/), editor (/editor), dati e comandi (/api)."""
 
-
-def stop_editor():
-    try:
-        os.remove(os.path.join(WEB, "alive"))      # il server si chiude da solo
-    except OSError:
+    def log_message(self, *a):
         pass
-    if EDITOR["proc"]:
+
+    def _send(self, data, ctype="application/json", code=200):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _file(self, p, ctype):
         try:
-            EDITOR["proc"].terminate()
-        except Exception:
+            n = os.path.getsize(p)
+        except (OSError, TypeError):
+            return self._send(b"not found", "text/plain", 404)
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(n))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with open(p, "rb") as f:
+            shutil.copyfileobj(f, self.wfile, 1 << 20)
+
+    def do_GET(self):
+        STATE["pinged"] = time.time()
+        p = self.path.split("?")[0]
+        try:
+            if p == "/":
+                self._send(MAIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            elif p == "/editor":
+                self._send(EDITOR_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            elif p == "/api/state":
+                self._send(json.dumps(_state()).encode("utf-8"))
+            elif p == "/api/ping":
+                self._send(b"ok", "text/plain")
+            elif p == "/session":
+                self._send(json.dumps(SESS).encode("utf-8"))
+            elif p == "/song":
+                s = SESS.get("song_path", "")
+                self._file(s, MIME.get(os.path.splitext(s)[1].lower(), "application/octet-stream"))
+            elif p in ("/logo", "/favicon.ico"):
+                self._file(_LOGO, "image/png")
+            elif p.startswith("/thumb/"):
+                self._file(_sprite(int(p.split("/")[2])), "image/jpeg")
+            else:
+                self._send(b"not found", "text/plain", 404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
-    EDITOR.update(proc=None, port=None)
+        except Exception as e:
+            try:
+                self._send(str(e).encode("utf-8"), "text/plain", 500)
+            except Exception:
+                pass
+
+    def do_POST(self):
+        STATE["pinged"] = time.time()
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        p = self.path.split("?")[0]
+        if p in ("/markers", "/done"):                # salvataggi dell'editor
+            name = os.path.join(WEB, "markers.json" if p == "/markers" else "done.json")
+            with open(name + ".tmp", "wb") as f:
+                f.write(body)
+            os.replace(name + ".tmp", name)
+            return self._send(b"ok", "text/plain")
+        try:
+            d = json.loads(body.decode("utf-8") or "{}")
+        except Exception:
+            d = {}
+        if p == "/api/set":
+            _apply_settings(d)
+        elif p == "/api/cmd":
+            _apply_settings(d.get("set") or {})
+            CMDQ.put(d.get("cmd"))
+        else:
+            return self._send(b"not found", "text/plain", 404)
+        self._send(b"ok", "text/plain")
 
 
-def _open_window(url):
-    """Finestra pulita (senza schede ne' barra) con Chrome o Edge; se mancano,
-    il browser predefinito."""
+def start_server():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    SERVER.update(srv=srv, port=srv.server_address[1])
+    return SERVER["port"]
+
+
+def _url(path=""):
+    return "http://127.0.0.1:%d/%s" % (SERVER["port"], path)
+
+
+def _open_window(url, size=(1500, 880)):
+    """Finestra pulita (senza schede ne' barra) con Chrome o Edge; se mancano, il browser
+    predefinito. Icona della finestra e della barra = logo Plutonic (favicon)."""
     flags = ["--app=" + url, "--new-window", "--no-first-run", "--no-default-browser-check",
-             "--autoplay-policy=no-user-gesture-required", "--window-size=1500,880",
+             "--autoplay-policy=no-user-gesture-required", "--window-size=%d,%d" % size,
              "--user-data-dir=" + os.path.join(WEB, "profilo_browser")]
     cands = []
     if os.name == "nt":
@@ -1679,10 +1628,6 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
                 tape=(), reuse=True, aspect=16 / 9.0):
     """Prepara la sessione e apre l'editor. Ritorna (ok, messaggio)."""
     os.makedirs(WEB, exist_ok=True)
-    with open(os.path.join(WEB, "editor.html"), "w", encoding="utf-8") as f:
-        f.write(EDITOR_HTML)
-    with open(os.path.join(WEB, "bt_server.py"), "w", encoding="utf-8") as f:
-        f.write(SERVER_PY)
     src = song.GetClipProperty("File Path") or ""
     path = src
     if os.path.splitext(src)[1].lower() not in BROWSER_AUDIO:   # es. .aiff/.wma
@@ -1700,11 +1645,11 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sess, f)
     os.replace(tmp, os.path.join(WEB, "session.json"))
-    port = _start_server()
-    if not port:
-        return False, "Non riesco ad avviare l'editor (server locale)."
-    _open_window("http://127.0.0.1:%d/?s=%s" % (port, SESSION[0]))
-    return True, "http://127.0.0.1:%d/" % port
+    SESS.clear()
+    SESS.update(sess)
+    url = _url("editor?s=%s" % SESSION[0])
+    _open_window(url, (1500, 880))
+    return True, url
 
 
 def editor_marks():
@@ -2105,11 +2050,14 @@ def _tl_fps(tl):
 
 
 # --------------------------------------------------------------------------
-# GUI
+# Pannello: una finestra a parte (come l'editor). Il plugin fa da "motore": esegue i
+# comandi che arrivano dalla finestra (Analizza, Adatta, Marker, Monta) con le API di
+# Resolve, mentre la finestra resta libera e mostra l'avanzamento in diretta.
 # --------------------------------------------------------------------------
-# Temi Plutonic: Scuro (Plutonic Studio) / Chiaro (Plutonic Labs).
-# La scelta e' ricordata (condivisa con PlutoniCut) in %APPDATA%\Plutonic\theme.txt
+# Tema condiviso con PlutoniCut (studio/labs) in %APPDATA%\Plutonic\theme.txt
 _THEME_FILE = os.path.join(os.environ.get("APPDATA", ""), "Plutonic", "theme.txt")
+_SET_FILE = os.path.join(os.environ.get("APPDATA", ""), "Plutonic", "beatonic.json")
+LOOKS = ("studio", "labs", "notte")      # aspetto della finestra: notte = scuro per l'editor
 
 
 def load_theme():
@@ -2130,117 +2078,42 @@ def save_theme(name):
         pass
 
 
-_PAL = {
-    "studio": {
-        "font": "'Segoe UI','Inter',sans-serif", "hfont": "'Segoe UI','Inter',sans-serif",
-        "bg": "#0f1115", "panel": "#111827", "tree": "#0b0d11", "fg": "#e5e7eb",
-        "logfg": "#cbd2da", "muted": "#9ca3af", "border": "#1f2937", "border2": "#374151",
-        "bw": "1px", "radius": "8px", "accent": "#7c3aed", "focus": "#8b5cf6",
-        "header": "#a78bfa", "selfg": "#ffffff",
-        "primaryBg": "#7c3aed", "primaryHover": "#8b5cf6",
-        "primaryFg": "#ffffff", "primaryBorder": "border:0;",
-    },
-    "labs": {
-        "font": "'Public Sans','Segoe UI',sans-serif", "hfont": "'Rubik Mono One','Impact',sans-serif",
-        "bg": "#F3F0F7", "panel": "#FBF4FF", "tree": "#FBF4FF", "fg": "#0E0418",
-        "logfg": "#24103F", "muted": "#4B4458", "border": "#0E0418", "border2": "#0E0418",
-        "bw": "2px", "radius": "6px", "accent": "#EE3A5B", "focus": "#EE3A5B",
-        "header": "#B0126E", "selfg": "#ffffff",
-        "primaryBg": "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #F7A541, stop:1 #EE3A5B)",
-        "primaryHover": "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #F4F07C, stop:1 #F7A541)",
-        "primaryFg": "#0E0418", "primaryBorder": "border:2px solid #0E0418;",
-    },
-}
+SET = {"sens": "Media (consigliata)", "style": list(STYLES)[0], "fmt": list(FORMATS)[0],
+       "ord": list(ORDERS)[0], "dur": 30.0, "reuse": True, "look": load_theme()}
+_CHOICES = {"sens": SENS, "style": STYLES, "fmt": FORMATS, "ord": ORDERS}
 
-_TMPL = """
-* { font-family:%(font)s; font-size:13px; color:%(fg)s; outline:none; }
-QWidget { background-color:%(bg)s; }
-QLabel#Header { font-family:%(hfont)s; font-size:20px; font-weight:800; color:%(header)s; }
-QPushButton#Logo { background:transparent; border:0; margin:0px; }
-QPushButton#ThemeBtn { background:transparent; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:4px 9px; color:%(muted)s; font-weight:700; }
-QPushButton#ThemeBtn:hover { border:%(bw)s solid %(accent)s; color:%(fg)s; }
-QLabel#Src { color:%(muted)s; padding:4px 2px; }
-QLineEdit, QComboBox { background:%(panel)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:6px 9px; margin:0px 3px; selection-background-color:%(accent)s; selection-color:%(selfg)s; }
-QLineEdit:focus, QComboBox:focus { border:%(bw)s solid %(focus)s; }
-QComboBox::drop-down { border:0; width:18px; }
-QPushButton { background:%(panel)s; border:%(bw)s solid %(border2)s; border-radius:%(radius)s; padding:7px 13px; margin:0px 3px; }
-QPushButton:hover { background:%(border)s; }
-QPushButton:pressed { background:%(tree)s; }
-QPushButton#Analyze, QPushButton#Make { background:%(primaryBg)s; color:%(primaryFg)s; font-weight:700; %(primaryBorder)s padding:9px 13px; }
-QPushButton#Analyze:hover, QPushButton#Make:hover { background:%(primaryHover)s; }
-QPushButton#Close { color:%(muted)s; }
-QCheckBox { spacing:6px; margin:0px 3px; }
-QCheckBox::indicator { width:16px; height:16px; border-radius:5px; border:%(bw)s solid %(border2)s; background:%(panel)s; }
-QCheckBox::indicator:checked { background:%(accent)s; border:%(bw)s solid %(accent)s; }
-QTextEdit { background:%(tree)s; border:%(bw)s solid %(border)s; border-radius:10px; color:%(logfg)s; padding:7px 9px; }
-QLabel#Status { color:%(muted)s; background:%(tree)s; border:%(bw)s solid %(border)s; border-radius:%(radius)s; padding:7px 10px; }
-"""
 
-STYLE_FOR = {name: _TMPL % pal for name, pal in _PAL.items()}
-THEME = load_theme()
-STYLE = STYLE_FOR[THEME]
+def _apply_settings(d, save=True):
+    """Impostazioni dalla finestra (validate) e ricordate per la prossima volta."""
+    for k, opts in _CHOICES.items():
+        if d.get(k) in opts:
+            SET[k] = d[k]
+    try:
+        if "dur" in d and float(d["dur"]) > 0:
+            SET["dur"] = float(d["dur"])
+    except (TypeError, ValueError):
+        pass
+    if "reuse" in d:
+        SET["reuse"] = bool(d["reuse"])
+    if d.get("look") in LOOKS and d["look"] != SET["look"]:
+        SET["look"] = d["look"]
+        save_theme("labs" if SET["look"] == "labs" else "studio")
+    if save:
+        try:
+            os.makedirs(os.path.dirname(_SET_FILE), exist_ok=True)
+            with open(_SET_FILE, "w", encoding="utf-8") as f:
+                json.dump(SET, f)
+        except Exception:
+            pass
 
-win = disp.AddWindow({
-    "ID": "BeaTonicWin", "WindowTitle": "BeaTonic", "Geometry": [120, 90, 940, 560],
-    "StyleSheet": STYLE,
-}, [
-    ui.VGroup({"Spacing": 7, "Margin": 14}, [
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Logo", "Flat": True, "Weight": 0,
-                       "MinimumSize": [62, 48], "MaximumSize": [62, 48]}),
-            ui.Label({"ID": "Header", "Text": "BeaTonic", "Weight": 0}),
-            ui.Label({"Text": "montaggio a tempo di musica", "Weight": 1,
-                      "Alignment": {"AlignBottom": True}}),
-            ui.Button({"ID": "ThemeBtn", "Text": "☀  Tema Labs", "Weight": 0}),
-        ]),
-        ui.Label({"ID": "Src", "Text": "Seleziona clip + canzone nel Media Pool, poi Aggiorna.",
-                  "Weight": 0}),
 
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Refresh", "Text": "Aggiorna selezione", "Weight": 4}),
-            ui.Label({"Text": "Sensib. scene", "Weight": 2}),
-            ui.ComboBox({"ID": "Sens", "Weight": 3}),
-            ui.Button({"ID": "Analyze", "Text": "▶  Analizza", "Weight": 4}),
-        ]),
+def _load_settings():
+    try:
+        with open(_SET_FILE, "r", encoding="utf-8") as f:
+            _apply_settings(json.load(f), save=False)
+    except Exception:
+        pass
 
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.ComboBox({"ID": "Style", "Weight": 5}),
-            ui.ComboBox({"ID": "Fmt", "Weight": 4}),
-            ui.Label({"Text": "Durata s", "Weight": 1}),
-            ui.LineEdit({"ID": "Dur", "PlaceholderText": "30", "Weight": 1}),
-            ui.ComboBox({"ID": "Ord", "Weight": 5}),
-            ui.CheckBox({"ID": "Reuse", "Text": "riusa clip", "Checked": True, "Weight": 2}),
-        ]),
-        ui.HGroup({"Weight": 0, "Spacing": 0}, [
-            ui.Button({"ID": "Fit", "Text": "♪  Adatta canzone", "Weight": 3}),
-            ui.Button({"ID": "Mark", "Text": "◆  Marker", "Weight": 3}),
-            ui.Button({"ID": "Make", "Text": "▶  Monta", "Weight": 3}),
-            ui.Button({"ID": "Close", "Text": "Chiudi", "Weight": 1}),
-        ]),
-
-        ui.TextEdit({"ID": "Log", "Weight": 1, "ReadOnly": True,
-                     "Text": "1) Seleziona clip + canzone  2) Analizza  "
-                             "3) Facoltativi: Adatta canzone (alla durata scelta) e Marker "
-                             "(vedi la canzone, l'anteprima e sistemi i tagli)  4) Monta."}),
-        ui.Label({"ID": "Status", "Text": "Pronto.", "Weight": 0, "WordWrap": True}),
-    ]),
-])
-
-itm = win.GetItems()
-try:
-    if os.path.exists(_LOGO):
-        itm["Logo"].Icon = ui.Icon({"File": _LOGO})
-        itm["Logo"].IconSize = [58, 44]
-except Exception:
-    pass
-for c in SENS:
-    itm["Sens"].AddItem(c)
-for s in STYLES:
-    itm["Style"].AddItem(s)
-for f in FORMATS:
-    itm["Fmt"].AddItem(f)
-for o in ORDERS:
-    itm["Ord"].AddItem(o)
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
@@ -2249,24 +2122,31 @@ SONG_LEN = [0.0]    # durata della canzone in uso (s)
 
 
 def set_status(m):
-    itm["Status"].Text = m
+    STATE["status"] = m
 
 
 def set_log(m):
-    try:
-        itm["Log"].PlainText = m
-    except Exception:
-        try:
-            itm["Log"].Text = m
-        except Exception:
-            pass
+    STATE["log"] = m
+
+
+def _state():
+    """Quello che la finestra mostra (solo dati gia' pronti: niente API di Resolve qui,
+    perche' questa funzione gira nei thread del server)."""
+    saved = editor_marks()
+    return {"sel": STATE["sel"], "set": SET, "log": STATE["log"], "status": STATE["status"],
+            "busy": STATE["busy"], "quit": STATE["quit"],
+            "opts": {"sens": list(SENS), "style": list(STYLES), "fmt": list(FORMATS), "ord": list(ORDERS)},
+            "info": {"analyzed": bool(BEATS), "shots": len(SHOTS), "bpm": BPM, "beats": len(BEATS),
+                     "bars": sum(1 for p in BPOS if p == 0), "song_len": SONG_LEN[0],
+                     "fitted": "BeaTonic" in (STATE["sel"]["song"] or ""),
+                     "marks": len(saved) if saved is not None else len(MARKS)}}
 
 
 def on_refresh(ev=None):
     global VIDEOS, SONG
     VIDEOS, SONG = selection()
-    itm["Src"].Text = "Selezione: %d clip video · canzone: %s" % (
-        len(VIDEOS), SONG.GetName() if SONG else "— (nessuna)")
+    STATE["sel"] = {"videos": [c.GetName() for c in VIDEOS], "song": SONG.GetName() if SONG else ""}
+    set_status("Selezione: %d clip video · canzone: %s" % (len(VIDEOS), SONG.GetName() if SONG else "nessuna"))
     if not FFMPEG:
         set_log("ffmpeg NON trovato. Installalo o imposta la variabile FFMPEG col percorso.")
 
@@ -2283,35 +2163,27 @@ def on_analyze(ev):
         set_log("Nessuna clip video selezionata nel Media Pool."); return
     if not SONG:
         set_log("Nessuna canzone (clip audio) selezionata nel Media Pool."); return
-    params = SENS.get(itm["Sens"].CurrentText, SENS["Media (consigliata)"])
+    params = SENS.get(SET["sens"], SENS["Media (consigliata)"])
     split = params is not None
-    set_status("Analisi in corso (la finestra resta ferma)…")
     SHOTS, n_cut, n_ref = build_shots(VIDEOS, params, set_log)
-    set_log("Scene analizzate: %d shot totali.\nAnalizzo i beat della canzone…" % len(SHOTS))
+    set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
     BPM, BEATS, BPOS, INTENS = beat_grid(SONG.GetClipProperty("File Path") or "")
     SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav"))
     bars = sum(1 for p in BPOS if p == 0)
-    set_log("ANALISI FATTA.\n• %d shot da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
+    set_log("ANALISI FATTA.\n• %d pezzi video da %d clip (%s).\n• Canzone: %.0f BPM, %d beat, "
             "%d battute (stacco minimo %.2fs).\n\n"
-            "Ora scegli stile/durata/formato/ordine. Premi 'Marker' per vedere la canzone "
-            "e sistemare i tagli, oppure direttamente 'Monta'."
+            "Ora scegli stile, formato, durata e ordine. Puoi adattare la canzone alla durata "
+            "e aprire l'editor dei marker, oppure premere direttamente 'Monta'."
             % (len(SHOTS), len(VIDEOS),
                ("%d stacchi + %d cambi d'inquadratura" % (n_cut, n_ref)) if split else "intere",
                BPM, len(BEATS), bars, MIN_CUT))
-    set_status("Analisi ok: %d shot · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
+    set_status("Analisi ok: %d pezzi video · %.0f BPM · %d beat." % (len(SHOTS), BPM, len(BEATS)))
 
 
 def _dur():
-    try:
-        return float((itm["Dur"].Text or "30").replace(",", "."))
-    except ValueError:
-        return 30.0
+    return float(SET["dur"]) if SET["dur"] > 0 else 30.0
 
 
-# --------------------------------------------------------------------------
-# Editor dei marker (finestra a parte): un solo tipo di marker, ogni marker =
-# un cambio clip, l'ultimo = la fine del montaggio
-# --------------------------------------------------------------------------
 def _proj_fps():
     try:
         f = float(resolve.GetProjectManager().GetCurrentProject().GetSetting("timelineFrameRate"))
@@ -2321,17 +2193,16 @@ def _proj_fps():
 
 
 def marks_from_beats():
-    return [b for _, b in _intervals(BEATS, BPOS, itm["Style"].CurrentText, _dur(), INTENS,
-                                     SONG_LEN[0])]
+    return [b for _, b in _intervals(BEATS, BPOS, SET["style"], _dur(), INTENS, SONG_LEN[0])]
 
 
 def _tape():
     """Le shot nell'ordine in cui verranno montate (stesso seme del montaggio)."""
-    return order_shots(SHOTS, ORDERS.get(itm["Ord"].CurrentText, "nameaz"), SEED[0])
+    return order_shots(SHOTS, ORDERS.get(SET["ord"], "nameaz"), SEED[0])
 
 
 def on_mark(ev):
-    """Apre l'editor dei marker con la canzone, la forma d'onda e i punti di stacco."""
+    """Apre l'editor dei marker con la canzone, la forma d'onda e l'anteprima del montato."""
     if not BEATS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     saved = editor_marks()
@@ -2339,20 +2210,18 @@ def on_mark(ev):
         MARKS[:] = saved
     elif not MARKS:
         MARKS[:] = marks_from_beats()
-    set_status("Apro l'editor dei marker…")
-    W, H = FORMATS.get(itm["Fmt"].CurrentText, (1920, 1080))
+    W, H = FORMATS.get(SET["fmt"], (1920, 1080))
     ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
-                           itm["Style"].CurrentText, _dur(), THEME, tape=_tape(),
-                           reuse=bool(itm["Reuse"].Checked), aspect=W / float(H))
+                           SET["style"], _dur(), "labs" if SET["look"] == "labs" else "studio",
+                           tape=_tape(), reuse=SET["reuse"], aspect=W / float(H))
     if not ok:
         set_log(info); set_status(info); return
     set_log("EDITOR DEI MARKER aperto in una finestra a parte (%d marker).\n\n"
-            "Lavora lì: trascina per scorrere, rotella per lo zoom, passa col mouse "
-            "sull'onda per ascoltare, Spazio = play, M = marker, trascina un marker per "
-            "spostarlo, clic destro per toglierlo. Si salva da solo.\n\n"
-            "Quando hai finito torna qui e premi 'Monta': una clip tra un marker e "
-            "l'altro, l'ultimo marker è la fine.\n\n"
-            "(Se la finestra non si è aperta: %s)" % (len(MARKS), info))
+            "Trascina per scorrere, rotella per lo zoom, passa col mouse sull'onda per "
+            "ascoltare, Q o M = marker dove c'è il mouse, Spazio = play. A destra "
+            "l'anteprima del montato. Si salva da solo.\n\n"
+            "Quando hai finito premi 'Monta' qui: una clip tra un marker e l'altro, "
+            "l'ultimo marker è la fine.\n\n(Se la finestra non si è aperta: %s)" % (len(MARKS), info))
     set_status("Editor aperto: sistema i marker, poi 'Monta'.")
 
 
@@ -2392,6 +2261,7 @@ def on_fit(ev):
     if not items:
         set_log("Canzone adattata creata ma non importata nel Media Pool:\n%s" % out); return
     SONG = items[0]
+    STATE["sel"] = {"videos": STATE["sel"]["videos"], "song": SONG.GetName()}
     BPM, BEATS, BPOS, INTENS = beat_grid(out)
     SONG_LEN[0] = _wav_dur(os.path.join(_TMP, "_song.wav")) or length
     MARKS[:] = []
@@ -2427,7 +2297,7 @@ def on_fit(ev):
 def on_make(ev):
     if not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
-    style = itm["Style"].CurrentText
+    style = SET["style"]
     saved = editor_marks()               # i marker salvati dall'editor (come li hai lasciati)
     if saved is not None:
         MARKS[:] = saved
@@ -2441,58 +2311,364 @@ def on_make(ev):
         ivs = _intervals(BEATS, BPOS, style, _dur(), INTENS, SONG_LEN[0])
         tag, src = style.split()[0], "dai beat (stile %s)" % style.split()[0]
     set_status("Montaggio in corso…")
-    msg = montage(SHOTS, SONG, ivs, tag, itm["Fmt"].CurrentText,
-                  ORDERS.get(itm["Ord"].CurrentText, "nameaz"),
-                  bool(itm["Reuse"].Checked), set_log, SEED[0])
+    msg = montage(SHOTS, SONG, ivs, tag, SET["fmt"],
+                  ORDERS.get(SET["ord"], "nameaz"),
+                  SET["reuse"], set_log, SEED[0])
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg.split("\n")[0][:90])
 
 
-def on_close(ev):
-    stop_editor()
-    disp.ExitLoop()
+def on_close(ev=None):
+    STATE["quit"] = True
 
 
-win.On.Refresh.Clicked = on_refresh
-win.On.Analyze.Clicked = on_analyze
-win.On.Fit.Clicked = on_fit
-win.On.Mark.Clicked = on_mark
-win.On.Make.Clicked = on_make
-win.On.Close.Clicked = on_close
-win.On.BeaTonicWin.Close = on_close
+CMDS = {"refresh": on_refresh, "analyze": on_analyze, "fit": on_fit, "mark": on_mark,
+        "make": on_make, "quit": on_close}
+
+MAIN_HTML = r"""<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>BeaTonic</title>
+<link rel="icon" id="fav" href="/logo">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Rubik+Mono+One&family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+:root { --r: 16px; --gap: 16px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { font: 14px/1.45 var(--font); color: var(--fg); background: var(--bg); }
+.bgfx { position: fixed; inset: 0; z-index: -1; pointer-events: none; background: var(--bgfx); overflow: hidden; }
+
+/* ---------- aspetto STUDIO: scuro, vetro, bagliori viola ---------- */
+body.look-studio {
+  --font: "Inter", "Segoe UI", system-ui, sans-serif; --hfont: 700 12px "Inter", "Segoe UI", sans-serif;
+  --titlefont: 800 30px "Inter", "Segoe UI", sans-serif; --titlels: -.02em; --ctafont: "Inter", "Segoe UI", sans-serif;
+  --bg: #0a0a12;
+  --bgfx: radial-gradient(900px 500px at 0% -10%, rgba(124,58,237,.38), transparent 60%),
+          radial-gradient(800px 500px at 110% 0%, rgba(192,38,211,.22), transparent 60%),
+          radial-gradient(900px 600px at 50% 120%, rgba(79,70,229,.25), transparent 60%);
+  --fg: #ece9fb; --muted: #a39fc0; --head: #c4b5fd; --logfg: #d6d1f0;
+  --card: rgba(255,255,255,.045); --tile: rgba(255,255,255,.04); --seg: rgba(255,255,255,.05);
+  --seg-h: rgba(255,255,255,.09); --btn: rgba(255,255,255,.07); --btn-h: rgba(255,255,255,.12);
+  --bd: 1px solid rgba(255,255,255,.09); --bd2: 1px solid rgba(255,255,255,.08);
+  --shadow: 0 20px 50px rgba(0,0,0,.35); --blur: blur(14px);
+  --accent: #8b5cf6; --accent-bg: linear-gradient(135deg, #7c3aed, #c026d3); --onaccent: #fff;
+  --onshadow: 0 8px 24px rgba(124,58,237,.45);
+  --titlebg: linear-gradient(90deg, #fff, #c4b5fd 60%, #f0abfc); --logofx: drop-shadow(0 6px 18px rgba(192,38,211,.45));
+}
+/* ---------- aspetto LABS: carta, bordi pieni, ombre nette, tramonto ---------- */
+body.look-labs {
+  --r: 10px;
+  --font: "Inter", "Public Sans", "Segoe UI", sans-serif; --hfont: 400 12px "Rubik Mono One", "Impact", sans-serif;
+  --titlefont: 400 30px "Rubik Mono One", "Impact", sans-serif; --titlels: 0; --ctafont: "Rubik Mono One", "Impact", sans-serif;
+  --bg: #F3F0F7; --bgfx: radial-gradient(#d8c8ea 1.2px, transparent 1.4px) 0 0 / 18px 18px;
+  --fg: #0E0418; --muted: #4B4458; --head: #B0126E; --logfg: #24103F;
+  --card: #FBF4FF; --tile: #F3F0F7; --seg: #fff; --seg-h: #F1E8FA; --btn: #fff; --btn-h: #F4F07C;
+  --bd: 2.5px solid #0E0418; --bd2: 2px solid #0E0418; --shadow: 6px 6px 0 #0E0418; --blur: none;
+  --accent: #EE3A5B; --accent-bg: linear-gradient(90deg, #F4F07C, #F7A541 45%, #EE3A5B); --onaccent: #0E0418;
+  --onshadow: 3px 3px 0 #0E0418;
+  --titlebg: linear-gradient(180deg, #F7A541, #EE3A5B 55%, #B0126E); --logofx: none;
+}
+body.look-labs .btn { box-shadow: 3px 3px 0 #0E0418; }
+body.look-labs .btn:active, body.look-labs .seg button:active { transform: translate(3px, 3px); box-shadow: none; }
+/* ---------- aspetto NOTTE: notte viola, tramonto all'orizzonte, griglia synth ---------- */
+body.look-notte {
+  --font: "Space Grotesk", "Inter", "Segoe UI", sans-serif; --hfont: 400 12px "Rubik Mono One", "Impact", sans-serif;
+  --titlefont: 400 32px "Rubik Mono One", "Impact", sans-serif; --titlels: .02em; --ctafont: "Rubik Mono One", "Impact", sans-serif;
+  --bg: #0c0418;
+  --bgfx: radial-gradient(760px 380px at 50% 108%, rgba(247,165,65,.55), rgba(238,58,91,.35) 35%, rgba(176,18,110,.18) 60%, transparent 75%),
+          linear-gradient(180deg, #12071F 0%, #1d0b36 55%, #2A0B4A 100%);
+  --fg: #fbefff; --muted: #c9b3df; --head: #F7A541; --logfg: #f2dcff;
+  --card: rgba(20,8,38,.72); --tile: rgba(255,255,255,.04); --seg: rgba(255,255,255,.05);
+  --seg-h: rgba(247,165,65,.12); --btn: rgba(255,255,255,.06); --btn-h: rgba(238,58,91,.18);
+  --bd: 1px solid rgba(247,165,65,.28); --bd2: 1px solid rgba(255,255,255,.1);
+  --shadow: 0 24px 60px rgba(0,0,0,.5), 0 0 40px rgba(176,18,110,.18); --blur: blur(10px);
+  --accent: #EE3A5B; --accent-bg: linear-gradient(90deg, #F4F07C, #F7A541 30%, #EE3A5B 65%, #B0126E);
+  --onaccent: #12071F; --onshadow: 0 0 24px rgba(238,58,91,.5);
+  --titlebg: linear-gradient(180deg, #F4F07C, #F7A541 35%, #EE3A5B 65%, #B0126E);
+  --logofx: drop-shadow(0 0 16px rgba(247,165,65,.55));
+}
+body.look-notte .bgfx::after {
+  content: ""; position: absolute; left: -50%; right: -50%; bottom: 0; height: 42%;
+  background-image: linear-gradient(rgba(238,58,91,.28) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(238,58,91,.28) 1px, transparent 1px);
+  background-size: 64px 42px; transform: perspective(520px) rotateX(62deg); transform-origin: bottom;
+  -webkit-mask-image: linear-gradient(transparent, #000 75%); mask-image: linear-gradient(transparent, #000 75%);
+}
+
+/* ---------- struttura ---------- */
+.top { display: flex; align-items: center; gap: 14px; padding: 18px 24px 6px; max-width: 1280px; margin: 0 auto; }
+#logo { height: 48px; width: auto; filter: var(--logofx); }
+.brand .name { font: var(--titlefont); letter-spacing: var(--titlels); background: var(--titlebg);
+  -webkit-background-clip: text; background-clip: text; color: transparent; line-height: 1.05; }
+.brand .tag { color: var(--muted); font-size: 12.5px; letter-spacing: .04em; }
+.spacer { flex: 1; }
+.looks { display: flex; gap: 4px; padding: 4px; border-radius: 999px; background: var(--seg); border: var(--bd2); }
+.looks span { align-self: center; padding: 0 6px 0 8px; font-size: 11px; color: var(--muted); }
+.looks button { all: unset; cursor: pointer; padding: 6px 12px; border-radius: 999px; font-weight: 700; font-size: 12px; color: var(--muted); }
+.looks button.on { background: var(--accent-bg); color: var(--onaccent); }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); padding: 14px 24px 24px; max-width: 1280px; margin: 0 auto; }
+.card { background: var(--card); border: var(--bd); border-radius: var(--r); padding: 16px 18px; box-shadow: var(--shadow);
+  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.wide { grid-column: 1 / -1; }
+h2 { margin: 0 0 2px; font: var(--hfont); letter-spacing: .12em; text-transform: uppercase; color: var(--head);
+  display: flex; align-items: center; gap: 10px; }
+h2 .n { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--accent-bg); color: var(--onaccent); font-size: 12px; letter-spacing: 0; }
+label { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .03em; }
+.tiles { display: grid; grid-template-columns: 1fr 1.7fr; gap: 10px; }
+.tile { background: var(--tile); border: var(--bd2); border-radius: calc(var(--r) - 4px); padding: 10px 12px; min-width: 0; }
+.tile .k { font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
+.tile .v { font-size: 30px; font-weight: 800; line-height: 1.15; }
+.tile .v.song { font-size: 15px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 6px 0 2px; }
+.tile .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button { all: unset; cursor: pointer; flex: 1 1 0; min-width: 84px; text-align: center; padding: 8px 10px;
+  border-radius: calc(var(--r) - 6px); background: var(--seg); border: var(--bd2); transition: background .15s, transform .1s; }
+.seg button b { display: block; font-weight: 700; font-size: 13px; }
+.seg button small { display: block; font-size: 11px; color: var(--muted); }
+.seg button:hover { background: var(--seg-h); }
+.seg button.on { background: var(--accent-bg); color: var(--onaccent); box-shadow: var(--onshadow); }
+.seg button.on small { color: inherit; opacity: .8; }
+.row { display: grid; grid-template-columns: 1.3fr .8fr .5fr; gap: 14px; align-items: end; }
+.row > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dur { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+.dur input { width: 100%; font: inherit; font-size: 20px; font-weight: 800; color: var(--fg); background: var(--seg);
+  border: var(--bd2); border-radius: calc(var(--r) - 6px); padding: 6px 10px; outline: none; }
+.switch { all: unset; cursor: pointer; width: 54px; height: 32px; border-radius: 999px; background: var(--seg); border: var(--bd2); position: relative; display: block; }
+.switch i { position: absolute; top: 4px; left: 4px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transition: .2s; }
+.switch.on { background: var(--accent-bg); }
+.switch.on i { left: 26px; background: var(--onaccent); }
+.btn { all: unset; cursor: pointer; text-align: center; padding: 11px 16px; border-radius: calc(var(--r) - 4px); font-weight: 700;
+  background: var(--btn); border: var(--bd2); transition: background .15s, transform .1s; }
+.btn:hover { background: var(--btn-h); }
+.btn.primary, .btn.cta { background: var(--accent-bg); color: var(--onaccent); box-shadow: var(--onshadow); }
+.btn.cta { font-family: var(--ctafont); font-size: 24px; padding: 24px; letter-spacing: .04em; }
+.btn.ghost { padding: 6px 12px; font-size: 12px; }
+.btn[disabled] { opacity: .45; pointer-events: none; }
+.btn.working { position: relative; overflow: hidden; opacity: 1 !important; }
+.btn.working::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent); animation: sh 1.1s infinite; }
+@keyframes sh { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+.hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+.chip { padding: 4px 10px; border-radius: 999px; background: var(--tile); border: var(--bd2); font-size: 12px; color: var(--muted); }
+.chip b { font-size: 14px; color: var(--fg); }
+.go { justify-content: center; }
+.status { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 4px rgba(34,197,94,.18); flex: none; }
+body.busy .dot { background: var(--accent); box-shadow: 0 0 0 4px rgba(238,58,91,.2); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+pre#log { margin: 0; max-height: 240px; overflow: auto; white-space: pre-wrap; font: 12.5px/1.55 ui-monospace, Consolas, monospace;
+  color: var(--logfg); background: var(--tile); border: var(--bd2); border-radius: calc(var(--r) - 6px); padding: 12px 14px; }
+.overlay { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.6); z-index: 9; }
+.overlay[hidden] { display: none; }
+.overlay .card { max-width: 520px; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body class="look-studio" data-look="studio">
+<div class="bgfx"></div>
+<header class="top">
+  <img id="logo" src="/logo" alt="">
+  <div class="brand"><div class="name">BeaTonic</div><div class="tag">montaggio a tempo di musica · Plutonic</div></div>
+  <div class="spacer"></div>
+  <div class="looks" title="Aspetto della finestra (anche l'editor dei marker lo segue)">
+    <span>Aspetto</span>
+    <button data-look="studio">Studio</button><button data-look="labs">Labs</button><button data-look="notte">Notte</button>
+  </div>
+</header>
+<main class="grid">
+  <section class="card">
+    <h2><span class="n">1</span> Materiale dal Media Pool</h2>
+    <div class="tiles">
+      <div class="tile"><div class="k">Clip video</div><div class="v" id="nVid">0</div><div class="sub" id="vidNames">—</div></div>
+      <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div></div>
+    </div>
+    <button class="btn" id="bRefresh" title="Rilegge le clip e la canzone selezionate nel Media Pool">↻ Aggiorna selezione</button>
+  </section>
+  <section class="card">
+    <h2><span class="n">2</span> Analisi</h2>
+    <label>Sensibilità scene</label>
+    <div class="seg" id="sens"></div>
+    <button class="btn primary" id="bAnalyze">Analizza clip e canzone</button>
+    <div class="chips" id="chips"></div>
+  </section>
+  <section class="card wide">
+    <h2><span class="n">3</span> Ritmo e formato</h2>
+    <label>Stile dei tagli</label>
+    <div class="seg" id="style"></div>
+    <div class="row">
+      <div><label>Formato</label><div class="seg" id="fmt"></div></div>
+      <div><label>Durata del montaggio</label><div class="dur"><input id="dur" type="number" min="1" step="1"><span>s</span></div></div>
+      <div><label title="Se il video finisce prima della durata: acceso ricomincia, spento si ferma">Riusa clip</label>
+        <button class="switch" id="reuse" role="switch" title="Se il video finisce prima della durata: acceso ricomincia da capo, spento si ferma"><i></i></button></div>
+    </div>
+    <label>Ordine delle clip</label>
+    <div class="seg" id="ord"></div>
+  </section>
+  <section class="card">
+    <h2><span class="n">4</span> Canzone e tagli</h2>
+    <button class="btn" id="bFit">♪ Adatta la canzone alla durata</button>
+    <p class="hint">Stessa canzone, inizio e finale veri: solo più corta o più lunga, senza tagli udibili.</p>
+    <button class="btn" id="bMark">◆ Apri l'editor dei marker</button>
+    <p class="hint" id="markInfo">Vedi la canzone e l'anteprima del montato, e sistemi i tagli.</p>
+  </section>
+  <section class="card go">
+    <button class="btn cta" id="bMake">▶ Monta</button>
+    <p class="hint" style="text-align:center">Crea la timeline in Resolve: una clip tra un marker e l'altro, sul ritmo.</p>
+  </section>
+  <section class="card wide">
+    <div class="status"><span class="dot"></span><span id="status">Pronto.</span><span class="spacer"></span>
+      <button class="btn ghost" id="bQuit" title="Chiude BeaTonic (anche l'editor dei marker)">Chiudi BeaTonic</button></div>
+    <pre id="log"></pre>
+  </section>
+</main>
+<div id="off" class="overlay" hidden><div class="card"><h2>BeaTonic è chiuso</h2>
+  <p>Per riaprirlo, in DaVinci Resolve: <b>Workspace ▸ Scripts ▸ Utility ▸ BeaTonic</b>.</p></div></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene delle clip e beat della canzone…",
+  fit: "Adatto la canzone alla durata…", mark: "Apro l'editor dei marker…", make: "Monto la timeline in Resolve…", quit: "Chiudo…"};
+const BTN = {refresh: "bRefresh", analyze: "bAnalyze", fit: "bFit", mark: "bMark", make: "bMake", quit: "bQuit"};
+let ST = null, inited = false, lastLog = null, fails = 0, closing = false;
+const esc = s => String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+const split = s => { const m = /^(.*?)\s*\((.*)\)\s*$/.exec(s); return m ? [m[1], m[2]] : [s, ""]; };
+const mmss = t => Math.floor(t / 60) + ":" + String(Math.round(t % 60)).padStart(2, "0");
+
+function seg(id, opts, val, short) {
+  const el = $(id);
+  el.innerHTML = "";
+  for (const o of opts) {
+    const b = document.createElement("button"), [t, s] = split(short ? short(o) : o);
+    b.innerHTML = "<b>" + esc(t) + "</b>" + (s ? "<small>" + esc(s) + "</small>" : "");
+    b.dataset.v = o;
+    b.classList.toggle("on", o === val);
+    b.onclick = () => { for (const x of el.children) x.classList.toggle("on", x === b); push(); };
+    el.appendChild(b);
+  }
+}
+const pick = id => { const b = $(id).querySelector(".on"); return b ? b.dataset.v : ""; };
+const collect = () => ({sens: pick("sens"), style: pick("style"), fmt: pick("fmt"), ord: pick("ord"),
+  dur: parseFloat($("dur").value) || 30, reuse: $("reuse").classList.contains("on"), look: document.body.dataset.look});
+function push() { fetch("/api/set", {method: "POST", body: JSON.stringify(collect())}).catch(() => {}); }
+function cmd(c) {
+  if (ST && ST.busy) return;
+  fetch("/api/cmd", {method: "POST", body: JSON.stringify({cmd: c, set: collect()})}).catch(() => {});
+  if (ST) { ST.busy = c; render(); }
+}
+function setLook(l) {
+  document.body.className = "look-" + l;
+  document.body.dataset.look = l;
+  for (const b of document.querySelectorAll(".looks button")) b.classList.toggle("on", b.dataset.look === l);
+}
+function favicon() {                          // logo Plutonic quadrato: icona della finestra e della barra
+  const im = new Image();
+  im.onload = () => {
+    const c = document.createElement("canvas"), g = c.getContext("2d");
+    c.width = c.height = 128;
+    const s = Math.min(128 / im.width, 128 / im.height);
+    g.drawImage(im, (128 - im.width * s) / 2, (128 - im.height * s) / 2, im.width * s, im.height * s);
+    $("fav").href = c.toDataURL("image/png");
+  };
+  im.src = "/logo";
+}
+function init() {
+  inited = true;
+  const s = ST.set, o = ST.opts;
+  seg("sens", o.sens, s.sens);
+  seg("style", o.style, s.style);
+  seg("fmt", o.fmt, s.fmt, x => { const m = /^(\S+)\s+(\d+:\d+)$/.exec(x); return m ? m[2] + " (" + m[1].toLowerCase() + ")" : x; });
+  seg("ord", o.ord, s.ord, x => x.replace(/^Ord:\s*/, ""));
+  $("dur").value = Math.round(s.dur * 100) / 100;
+  $("reuse").classList.toggle("on", !!s.reuse);
+  setLook(s.look || "studio");
+}
+function render() {
+  const v = ST.sel.videos || [], inf = ST.info;
+  $("nVid").textContent = v.length;
+  $("vidNames").textContent = v.length ? v.slice(0, 3).join(" · ") + (v.length > 3 ? " +" + (v.length - 3) : "") : "selezionale nel Media Pool";
+  $("songName").textContent = ST.sel.song || "—";
+  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata alla durata" : "") : "da analizzare")
+                                          : "selezionala nel Media Pool";
+  $("chips").innerHTML = inf.analyzed ?
+    ["<b>" + inf.shots + "</b> pezzi video", "<b>" + Math.round(inf.bpm) + "</b> BPM", "<b>" + inf.bars + "</b> battute", "<b>" + inf.beats + "</b> beat"]
+      .map(x => "<span class='chip'>" + x + "</span>").join("") : "<span class='chip'>non ancora analizzato</span>";
+  $("markInfo").textContent = inf.marks ? inf.marks + " marker pronti: si salvano da soli dall'editor."
+                                        : "Vedi la canzone e l'anteprima del montato, e sistemi i tagli.";
+  if (ST.log !== lastLog) { const L = $("log"); L.textContent = ST.log; L.scrollTop = 0; lastLog = ST.log; }
+  $("status").textContent = ST.busy ? (BUSY[ST.busy] || "Lavoro…") : ST.status;
+  document.body.classList.toggle("busy", !!ST.busy);
+  for (const [c, id] of Object.entries(BTN)) {
+    $(id).disabled = !!ST.busy && c !== ST.busy;
+    $(id).classList.toggle("working", ST.busy === c);
+  }
+  for (const id of ["bAnalyze"]) if (!ST.busy) $(id).disabled = !(v.length && ST.sel.song);
+  for (const id of ["bFit", "bMark", "bMake"]) if (!ST.busy) $(id).disabled = !inf.analyzed;
+}
+async function poll() {
+  try {
+    const r = await fetch("/api/state", {cache: "no-store"});
+    ST = await r.json();
+    fails = 0; $("off").hidden = true;
+    if (!inited) init();
+    render();
+    if (ST.quit) { closing = true; $("off").hidden = false; setTimeout(() => window.close(), 400); return; }
+  } catch (e) { if (++fails > 3) $("off").hidden = false; }
+  setTimeout(poll, ST && ST.busy ? 300 : 700);
+}
+for (const b of document.querySelectorAll(".looks button")) b.onclick = () => { setLook(b.dataset.look); push(); };
+$("reuse").onclick = () => { $("reuse").classList.toggle("on"); push(); };
+$("dur").addEventListener("change", push);
+for (const [c, id] of Object.entries(BTN)) $(id).onclick = () => cmd(c);
+favicon();
+poll();
+</script>
+</body>
+</html>
+"""
 
 
-def apply_theme(name):
-    global THEME
-    THEME = name
-    done = False
+def main():
+    """Avvia il server, apre il pannello ed esegue i comandi finche' c'e' almeno una
+    finestra di BeaTonic aperta (pannello o editor): poi si chiude da solo."""
+    os.makedirs(WEB, exist_ok=True)
+    _load_settings()
     try:
-        win.SetStyleSheet(STYLE_FOR[name]); done = True
+        on_refresh()
     except Exception:
         pass
-    if not done:
+    set_log("1) Seleziona nel Media Pool le clip video + la canzone   2) Analizza\n"
+            "3) Scegli stile, formato, durata e ordine   4) Facoltativi: adatta la canzone, "
+            "editor dei marker   5) Monta.")
+    port = start_server()
+    print("BeaTonic: pannello su http://127.0.0.1:%d/" % port)
+    _open_window(_url(), (1180, 860))
+    started = time.time()
+    while not STATE["quit"]:
         try:
-            itm["BeaTonicWin"].SetStyleSheet(STYLE_FOR[name])
-        except Exception:
-            pass
+            cmd = CMDQ.get(timeout=0.25)
+        except queue.Empty:
+            cmd = None
+        if cmd in CMDS:
+            STATE["busy"] = cmd
+            try:
+                CMDS[cmd](None)
+            except Exception as e:      # mai piu' finestre bloccate: l'errore va nel log
+                import traceback
+                set_log("ERRORE durante '%s':\n%s" % (cmd, traceback.format_exc()[-1800:]))
+                set_status("Errore: %s" % e)
+            finally:
+                STATE["busy"] = ""
+        last = STATE["pinged"] or started
+        if time.time() - last > (25 if STATE["pinged"] else 180):
+            break                        # nessuna finestra aperta da un po': fine
+    time.sleep(1.0)                      # la finestra fa in tempo a vedere "chiuso"
     try:
-        itm["ThemeBtn"].Text = ("☀  Tema Labs" if name == "studio"
-                                else "☾  Tema Studio")
+        SERVER["srv"].shutdown()
     except Exception:
         pass
-    save_theme(name)
 
 
-def on_theme(ev=None):
-    apply_theme("labs" if THEME == "studio" else "studio")
-
-
-win.On.ThemeBtn.Clicked = on_theme
-apply_theme(THEME)
-
-on_refresh()
-if not FFMPEG:
-    set_status("ffmpeg non trovato.")
-win.Show()
-disp.RunLoop()
-win.Hide()
+main()
