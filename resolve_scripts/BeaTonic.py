@@ -1164,18 +1164,26 @@ function buildPlan() {
   const tape = S.tape || [], n = tape.length;
   if (!n || !marks.length) return;
   const PHI = 0.6180339887498949;
-  let rp = new Map(), order = [...Array(n).keys()], si = 0, giri = 0, prev = 0, lastC = null;
-  let avg = 0;
-  { let p0 = 0, c = 0; for (const m of marks) { if (m - p0 > 0) { avg += m - p0; c++; } p0 = m; } avg = c ? avg / c : 1; }
+  let rp = new Map(), order = [...Array(n).keys()], si = 0, giri = 0, prev = 0, lastC = null, lastK = null;
+  let avg = 0, need = 0;
+  { let p0 = 0, c = 0; for (const m of marks) { if (m - p0 > 0) { avg += m - p0; c++; } p0 = m; } need = avg; avg = c ? avg / c : 1; }
+  let mat = 0; for (const x of tape) mat += x.out - x.in;
+  const step = Math.max(1, 0.85 * mat / Math.max(need, 0.01));   // = step di BeaTonic: pezzi sparsi
   const rem = k => tape[k].out - tape[k].in - (rp.get(k) || 0);
   const take = (k, amt, t) => {
-    const st = tape[k].in + (rp.get(k) || 0);
-    rp.set(k, st + amt - tape[k].in);
-    lastC = tape[k].c;
+    const used = rp.get(k) || 0, st = tape[k].in + used;
+    rp.set(k, Math.min(tape[k].out - tape[k].in, used + amt * step));
+    lastC = tape[k].c; lastK = k;
     plan.push({t0: t, t1: t + amt, c: tape[k].c, s0: st, rep: giri > 0});
   };
-  const whole = need => {
-    for (let j = 0; j < n; j++) { const p = (si + j) % n; if (rem(order[p]) >= need - 1e-4) return p; }
+  const whole = need => {                     // = find_whole di BeaTonic (livelli 2, 1, 0)
+    const levels = (S.vary && lastC !== null ? [2] : []).concat(n > 1 ? [1] : [], !S.reuse || n === 1 ? [0] : []);
+    for (const lvl of levels)
+      for (let j = 0; j < n; j++) {
+        const p = (si + j) % n, k = order[p];
+        if ((lvl === 2 && tape[k].c === lastC) || (lvl >= 1 && k === lastK)) continue;
+        if (rem(k) >= need - 1e-4) return p;
+      }
     return -1;
   };
   const nextRound = () => {
@@ -1550,7 +1558,15 @@ function setLook(l) {                         // stesso aspetto del pannello (St
   dirty = true;
   try { drawPreview(); } catch (e) {}
 }
-setInterval(() => fetch("/api/ping").then(r => r.text()).then(setLook).catch(() => {}), 1500);   // "sono aperto" + aspetto
+setInterval(() => fetch("/api/ping").then(r => r.json()).then(async d => {   // "sono aperto" + aspetto
+  setLook(d.look);
+  if (S && d.v !== S.ver) {                    // dopo un montaggio l'ordine e' rimescolato
+    try {
+      const n = await (await fetch("/session", {cache: "no-store"})).json();
+      if (n.session === S.session) { S.tape = n.tape; S.seed = n.seed; S.vary = n.vary; S.ver = n.ver; buildPlan(); dirty = true; }
+    } catch (e) {}
+  }
+}).catch(() => {}), 1500);   // "sono aperto" + aspetto
 (function favicon() {                         // logo Plutonic quadrato: icona della finestra e della barra
   const im = new Image();
   im.onload = () => {
@@ -1634,7 +1650,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif p == "/api/state":
                 self._send(json.dumps(_state()).encode("utf-8"))
             elif p == "/api/ping":
-                self._send(SET["look"].encode("utf-8"), "text/plain")   # l'editor segue l'aspetto
+                self._send(json.dumps({"look": SET["look"], "v": SESS.get("ver", 0)}).encode("utf-8"))
             elif p == "/session":
                 self._send(json.dumps(SESS).encode("utf-8"))
             elif p == "/song":
@@ -1792,7 +1808,7 @@ def _preview_data(tape):
     """Clip e sequenza delle shot (nell'ordine del montaggio) per l'anteprima nell'editor.
     Per ogni clip: dati del mosaico di miniature (al massimo ~300 per clip)."""
     clips, index, seq = [], {}, []
-    for sh in tape:
+    for sh in sorted(tape, key=lambda x: x["clip"].GetClipProperty("File Path") or x["clip"].GetName()):
         c = sh["clip"]
         key = c.GetClipProperty("File Path") or c.GetName()
         if key not in index:
@@ -1802,12 +1818,14 @@ def _preview_data(tape):
             index[key] = len(clips)
             clips.append({"name": c.GetName(), "path": key, "f": round(f, 4), "n": n,
                           "cols": 10, "rows": int(math.ceil(n / 10.0))})
-        seq.append({"c": index[key], "in": sh["in"], "out": sh["out"]})
+    for sh in tape:
+        c = sh["clip"]
+        seq.append({"c": index[c.GetClipProperty("File Path") or c.GetName()], "in": sh["in"], "out": sh["out"]})
     return clips, seq
 
 
 def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
-                tape=(), reuse=True, aspect=16 / 9.0):
+                tape=(), reuse=True, aspect=16 / 9.0, key="mine"):
     """Prepara la sessione e apre l'editor. Ritorna (ok, messaggio)."""
     os.makedirs(WEB, exist_ok=True)
     src = song.GetClipProperty("File Path") or ""
@@ -1823,7 +1841,8 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
                       [["Proposta " + name, key] for key, name, _d in PRESETS],
             "logo": _LOGO if os.path.exists(_LOGO) else ""}
     sess["clips"], sess["tape"] = _preview_data(tape)
-    sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG, seed=SEED[0])
+    sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG, seed=_seed(key), key=key,
+                vary=ORDERS.get(SET["ord"]) == "casuale", ver=SESS.get("ver", 0) + 1)
     tmp = os.path.join(WEB, "session.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sess, f)
@@ -1887,28 +1906,41 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
     ckeys = [sh["clip"].GetClipProperty("File Path") or sh["clip"].GetName() for sh in tape]
     lens = [b - a for a, b in ivs if b - a > 0]
     avg_cut = sum(lens) / len(lens) if lens else 1.0
+    vary = order_mode == "casuale"   # casuale: mai lo stesso video due volte di fila
+    # Se il materiale e' piu' del montaggio, i pezzi di una scena si SPARGONO lungo tutta
+    # la scena (salto in avanti a ogni ritorno) invece di riprendere da dove si era fermata.
+    step = max(1.0, 0.85 * sum(sh["out"] - sh["in"] for sh in tape) / max(sum(lens), 0.01))
     order = list(range(n_t))   # giro 0: l'ordine scelto
     shot_i = [0]               # posizione in 'order' da cui cercare la prossima shot
     read_pos = {}              # indice shot -> secondi gia' usati di quella shot (in questo giro)
     exhausted = [False]
     giri = [0]                 # quante volte il materiale nuovo e' finito e si e' ricominciato
     last = [None]              # clip dell'ultimo stacco
+    lastk = [None]             # shot dell'ultimo stacco
 
     def remaining(k):
         return tape[k]["out"] - tape[k]["in"] - read_pos.get(k, 0.0)
 
     def take(k, amount):
         sh = tape[k]
-        start = sh["in"] + read_pos.get(k, 0.0)
-        read_pos[k] = start + amount - sh["in"]
-        last[0] = ckeys[k]
+        used = read_pos.get(k, 0.0)
+        start = sh["in"] + used
+        read_pos[k] = min(sh["out"] - sh["in"], used + amount * step)
+        last[0], lastk[0] = ckeys[k], k
         return (sh["clip"], sh["fps"], start, start + amount)
 
     def find_whole(need):
-        for j in range(n_t):
-            p = (shot_i[0] + j) % n_t
-            if remaining(order[p]) >= need - 1e-4:   # (tolleranza: errori di arrotondamento)
-                return p
+        # livelli: 2 = video diverso dall'ultimo (casuale), 1 = scena diversa (mai la stessa
+        # di fila: sarebbe un taglio invisibile), 0 = qualsiasi (solo a riusa spento, alla fine)
+        levels = ([2] if vary and last[0] is not None else []) + ([1] if n_t > 1 else []) +                  ([0] if not reuse or n_t == 1 else [])
+        for lvl in levels:
+            for j in range(n_t):
+                p = (shot_i[0] + j) % n_t
+                k = order[p]
+                if (lvl == 2 and ckeys[k] == last[0]) or (lvl >= 1 and k == lastk[0]):
+                    continue
+                if remaining(k) >= need - 1e-4:   # (tolleranza: arrotondamenti)
+                    return p
         return None
 
     def next_round():
@@ -2334,7 +2366,24 @@ def _load_settings():
 
 VIDEOS, SONG, SHOTS, BEATS, BPOS, BPM, INTENS = [], None, [], [], [], 0.0, []
 MARKS = []          # punti di stacco dell'editor (s): ogni marker = un cambio clip
-SEED = [int(time.time() * 1000) & 0x7fffffff]   # ordine casuale fisso: anteprima = montaggio
+SEED = [int(time.time() * 1000) & 0x7fffffff]   # ordine casuale: anteprima = montaggio,
+OPT_KEYS = ("mine", "energia", "groove", "cinema")   # ma ogni opzione ha il suo e dopo ogni
+                                                     # montaggio si rimescola
+
+
+def _seed(key="mine"):
+    k = OPT_KEYS.index(key) if key in OPT_KEYS else 0
+    return (SEED[0] + 104729 * k) & 0x7fffffff
+
+
+def _reshuffle():
+    """Dopo un montaggio: il prossimo avra' un ordine nuovo (e l'editor aperto lo mostra)."""
+    import random
+    SEED[0] = random.randrange(1, 0x7fffffff)
+    if SESS.get("tape") is not None and SHOTS:
+        SESS["clips"], SESS["tape"] = _preview_data(_tape(SESS.get("key", "mine")))
+        SESS["seed"] = _seed(SESS.get("key", "mine"))
+        SESS["ver"] = SESS.get("ver", 0) + 1
 SONG_LEN = [0.0]    # durata della canzone in uso (s)
 FITTED = {}         # canzone adattata in uso: orig_item, orig (file), orig_name, item, path
 SHOT_CACHE = {}     # (file clip, sensibilita') -> ([(in, out)], n stacchi, n cambi inquadratura)
@@ -2503,9 +2552,9 @@ def marks_from_beats():
     return [b for _, b in _intervals(BEATS, BPOS, SET["style"], _dur(), INTENS, SONG_LEN[0])]
 
 
-def _tape():
+def _tape(key="mine"):
     """Le shot nell'ordine in cui verranno montate (stesso seme del montaggio)."""
-    return order_shots(SHOTS, ORDERS.get(SET["ord"], "nameaz"), SEED[0])
+    return order_shots(SHOTS, ORDERS.get(SET["ord"], "nameaz"), _seed(key))
 
 
 def on_mark(ev):
@@ -2518,10 +2567,12 @@ def on_mark(ev):
     elif not MARKS:
         MARKS[:] = marks_from_beats()
     W, H = FORMATS.get(SET["fmt"], (1920, 1080))
-    style = ev if isinstance(ev, str) else SET["style"]   # una proposta apre col suo taglio
+    key = ev if ev in OPT_KEYS else "mine"
+    p = _preset(key)
+    style = "Proposta " + p[1] if p else SET["style"]   # una proposta apre col suo taglio
     ok, info = editor_open(SONG, list(MARKS), BEATS, BPOS, INTENS, BPM, _proj_fps(),
                            style, _dur(), SET["look"],
-                           tape=_tape(), reuse=SET["reuse"], aspect=W / float(H))
+                           tape=_tape(key), reuse=SET["reuse"], aspect=W / float(H), key=key)
     if not ok:
         set_log(info); set_status(info); return
     set_log("EDITOR DEI MARKER aperto in una finestra a parte (%d marker).\n\n"
@@ -2653,7 +2704,7 @@ def on_preset_edit(key):
         set_log("Prima premi 'Analizza'."); return
     SESSION[0] = "%x" % int(time.time() * 1000)   # un editor gia' aperto non la sovrascrive
     _save_marks([b for _, b in preset_ivs(key)])
-    on_mark("Proposta " + p[1])
+    on_mark(key)
     set_log("Proposta «%s» aperta nell'editor: %s\n\n%s" % (p[1], p[2], STATE["log"]))
 
 
@@ -2665,7 +2716,8 @@ def on_preset_make(key):
     if not p or not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     msg = montage(SHOTS, SONG, preset_ivs(key), p[1], SET["fmt"], ORDERS[SET["ord"]],
-                  SET["reuse"], set_log, SEED[0], name=SET["tlname"] or None)
+                  SET["reuse"], set_log, _seed(key), name=SET["tlname"] or None)
+    _reshuffle()
     set_log("%s\nProposta «%s»: %s" % (msg, p[1], p[2]))
     set_status(msg.split("\n")[0][:90])
 
@@ -2678,11 +2730,12 @@ def on_preset_all(ev=None):
     for key, name, desc in PRESETS:
         set_status("Monto la proposta «%s»…" % name)
         msgs.append(montage(SHOTS, SONG, preset_ivs(key), name, SET["fmt"], ORDERS[SET["ord"]],
-                            SET["reuse"], set_log, SEED[0],
+                            SET["reuse"], set_log, _seed(key),
                             name="%s %s" % (SET["tlname"], name) if SET["tlname"] else None))
     base = (SET["tlname"] + " ") if SET["tlname"] else "BeaTonic_"
     set_log("TRE TIMELINE DA CONFRONTARE in Resolve (%sEnergia, %sGroove, %sCinematico):\n\n"
             % (base, base, base) + "\n\n".join(msgs))
+    _reshuffle()
     set_status("Create le tre timeline delle proposte.")
 
 
@@ -2717,7 +2770,9 @@ def on_make(ev):
     set_status("Montaggio in corso…")
     msg = montage(SHOTS, SONG, ivs, tag, SET["fmt"],
                   ORDERS.get(SET["ord"], "nameaz"),
-                  SET["reuse"], set_log, SEED[0], name=SET["tlname"] or None)
+                  SET["reuse"], set_log, _seed(SESS.get("key", "mine") if MARKS else "mine"),
+                  name=SET["tlname"] or None)   # (stesso ordine dell'anteprima dell'editor)
+    _reshuffle()
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg.split("\n")[0][:90])
 

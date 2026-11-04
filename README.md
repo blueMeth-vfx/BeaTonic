@@ -198,13 +198,18 @@ l'**inizio e il finale veri**, solo più corta o più lunga.
 > L'editor gira solo sul tuo computer (un piccolo server locale su `127.0.0.1`, che si
 > spegne quando chiudi BeaTonic): nessuna connessione esterna.
 
-**Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
-ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si
-ripete solo dopo aver usato **tutto** il materiale. Quando il materiale finisce e
-"riusa le clip" è acceso, il giro dopo **non è una copia del primo**: le clip arrivano
-in un **ordine diverso** e ognuna riparte da un **punto spostato**, così non si rivedono
-gli stessi fotogrammi tagliati allo stesso modo (e mai la stessa clip a cavallo tra un
-giro e l'altro). L'anteprima nell'editor mostra esattamente lo stesso montaggio.
+**Varietà:** a ogni stacco arriva una scena diversa (mai la stessa due volte di fila) e,
+in ordine **Casuale**, anche un **video diverso** dall'ultimo ogni volta che è possibile.
+Quando una scena ritorna, i suoi pezzi sono **sparsi lungo tutta la scena** (se il
+materiale è più del montaggio, si salta avanti invece di riprendere da dove si era
+fermata), e un pezzo già visto si ripete solo dopo aver usato **tutto** il materiale.
+Quando il materiale finisce e "riusa le clip" è acceso, il giro dopo **non è una copia
+del primo**: ordine diverso e punti di partenza spostati.
+
+**Casuale è davvero casuale:** ognuna delle quattro opzioni ha il suo ordine, quindi
+"Monta le 3 proposte" dà tre ordini diversi, e **dopo ogni montaggio l'ordine si
+rimescola**: rimontando esce un montaggio nuovo. L'anteprima dell'editor mostra sempre
+l'ordine che userà il prossimo "Monta" e si aggiorna da sola.
 
 | Stile | Taglio |
 |---|---|
