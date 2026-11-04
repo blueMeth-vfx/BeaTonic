@@ -200,7 +200,11 @@ l'**inizio e il finale veri**, solo più corta o più lunga.
 
 **Varietà:** a ogni stacco arriva una clip diversa (mai la stessa due volte di fila);
 ogni volta che una clip ritorna ne mostra un pezzo nuovo, e un pezzo già visto si
-ripete solo dopo aver usato **tutto** il materiale.
+ripete solo dopo aver usato **tutto** il materiale. Quando il materiale finisce e
+"riusa le clip" è acceso, il giro dopo **non è una copia del primo**: le clip arrivano
+in un **ordine diverso** e ognuna riparte da un **punto spostato**, così non si rivedono
+gli stessi fotogrammi tagliati allo stesso modo (e mai la stessa clip a cavallo tra un
+giro e l'altro). L'anteprima nell'editor mostra esattamente lo stesso montaggio.
 
 | Stile | Taglio |
 |---|---|

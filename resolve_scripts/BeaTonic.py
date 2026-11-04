@@ -570,6 +570,37 @@ def order_shots(shots, mode, seed=None):
     return tape                                            # "selezione": come selezionate
 
 
+def _rng(seed):
+    """Numeri casuali ripetibili, IDENTICI a quelli dell'editor (mulberry32 in JS)."""
+    st = [seed & 0xFFFFFFFF]
+
+    def nxt():
+        a = st[0] = (st[0] + 0x6D2B79F5) & 0xFFFFFFFF
+        t = ((a ^ (a >> 15)) * (a | 1)) & 0xFFFFFFFF
+        t = ((t + (((t ^ (t >> 7)) * (t | 61)) & 0xFFFFFFFF)) & 0xFFFFFFFF) ^ t
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296.0
+    return nxt
+
+
+PHI = 0.6180339887498949   # spostamento dei punti di partenza a ogni giro (sezione aurea)
+
+
+def new_round(n, giro, seed, last_ckey, ckeys):
+    """Ordine delle shot per un NUOVO giro del materiale: mischiato (ripetibile) e mai
+    con la stessa clip appena vista come prima shot."""
+    rnd = _rng((seed or 0) + 7919 * giro)
+    order = list(range(n))
+    for i in range(n - 1, 0, -1):
+        j = int(rnd() * (i + 1))
+        order[i], order[j] = order[j], order[i]
+    if n > 1 and ckeys[order[0]] == last_ckey:
+        for j in range(1, n):
+            if ckeys[order[j]] != last_ckey:
+                order[0], order[j] = order[j], order[0]
+                break
+    return order
+
+
 def _new_timeline(mp, base):
     new = mp.CreateEmptyTimeline(base)
     n = 2
@@ -1110,38 +1141,67 @@ function fromBeats(mode, dur) {
 // ---------------------------------------------------------------- anteprima del montato
 // Stesse regole di BeaTonic: una shot NUOVA a ogni stacco, ogni ritorno a una clip
 // ne mostra un pezzo nuovo, si ripete solo quando il materiale e' finito.
+function rng(seed) {                         // = _rng di BeaTonic (mulberry32): stessi numeri
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), a | 1) >>> 0;
+    t = (((t + (Math.imul(t ^ (t >>> 7), t | 61) >>> 0)) >>> 0) ^ t) >>> 0;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function newRound(n, giro, lastC) {           // = new_round di BeaTonic
+  const r = rng((S.seed || 0) + 7919 * giro), order = [...Array(n).keys()];
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
+  if (n > 1 && S.tape[order[0]].c === lastC)
+    for (let j = 1; j < n; j++) if (S.tape[order[j]].c !== lastC) { [order[0], order[j]] = [order[j], order[0]]; break; }
+  return order;
+}
+// Stesse regole di Monta: una shot NUOVA a ogni stacco; finito il materiale, un nuovo giro
+// con ordine diverso e punti di partenza spostati (mai lo stesso minuto identico).
 function buildPlan() {
   plan = [];
-  const tape = S.tape || [];
-  if (!tape.length || !marks.length) return;
-  const rp = new Map();
-  let si = 0, giri = 0, prev = 0;
+  const tape = S.tape || [], n = tape.length;
+  if (!n || !marks.length) return;
+  const PHI = 0.6180339887498949;
+  let rp = new Map(), order = [...Array(n).keys()], si = 0, giri = 0, prev = 0, lastC = null;
+  let avg = 0;
+  { let p0 = 0, c = 0; for (const m of marks) { if (m - p0 > 0) { avg += m - p0; c++; } p0 = m; } avg = c ? avg / c : 1; }
   const rem = k => tape[k].out - tape[k].in - (rp.get(k) || 0);
   const take = (k, amt, t) => {
     const st = tape[k].in + (rp.get(k) || 0);
     rp.set(k, st + amt - tape[k].in);
+    lastC = tape[k].c;
     plan.push({t0: t, t1: t + amt, c: tape[k].c, s0: st, rep: giri > 0});
   };
   const whole = need => {
-    for (let j = 0; j < tape.length; j++) { const k = (si + j) % tape.length; if (rem(k) >= need) return k; }
+    for (let j = 0; j < n; j++) { const p = (si + j) % n; if (rem(order[p]) >= need - 1e-4) return p; }
     return -1;
+  };
+  const nextRound = () => {
+    giri++;
+    order = newRound(n, giri, lastC);
+    si = 0;
+    const off = (giri * PHI % 1) * avg;
+    rp = new Map();
+    for (let k = 0; k < n; k++) if (tape[k].out - tape[k].in - off >= S.min_cut) rp.set(k, off);
   };
   for (const m of marks) {
     const len = m - prev, t = prev;
     prev = m;
     if (len <= 0.02) continue;
-    let k = whole(len);
-    if (k < 0 && S.reuse) { rp.clear(); giri++; k = whole(len); }
-    if (k >= 0) { si = k + 1; take(k, len, t); continue; }
+    let p = whole(len);
+    if (p < 0 && S.reuse) { nextRound(); p = whole(len); if (p < 0) { rp = new Map(); p = whole(len); } }
+    if (p >= 0) { si = p + 1; take(order[p], len, t); continue; }
     let longest = 0;
-    for (let j = 0; j < tape.length; j++) longest = Math.max(longest, rem(j));
-    const n = longest > 0.02 ? Math.ceil(len / longest - 1e-9) : 0;
-    if (!n || len / n < S.min_cut) break;
+    for (let k = 0; k < n; k++) longest = Math.max(longest, rem(k));
+    const parts = longest > 0.02 ? Math.ceil(len / longest - 1e-9) : 0;
+    if (!parts || len / parts < S.min_cut) break;
     let ok = true;
-    for (let q = 0; q < n; q++) {
-      const kk = whole(len / n);
-      if (kk < 0) { ok = false; break; }
-      si = kk + 1; take(kk, len / n, t + q * len / n);
+    for (let q = 0; q < parts; q++) {
+      const pp = whole(len / parts);
+      if (pp < 0) { ok = false; break; }
+      si = pp + 1; take(order[pp], len / parts, t + q * len / parts);
     }
     if (!ok) break;
   }
@@ -1763,7 +1823,7 @@ def editor_open(song, marks, beats, bpos, intens, bpm, fps, style, dur, theme,
                       [["Proposta " + name, key] for key, name, _d in PRESETS],
             "logo": _LOGO if os.path.exists(_LOGO) else ""}
     sess["clips"], sess["tape"] = _preview_data(tape)
-    sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG)
+    sess.update(reuse=bool(reuse), aspect=aspect, ffmpeg=FFMPEG, seed=SEED[0])
     tmp = os.path.join(WEB, "session.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sess, f)
@@ -1821,39 +1881,61 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
     # Quando nessuna shot ha piu' abbastanza materiale nuovo: nuovo giro (riusa)
     # oppure stop. Uno stacco si spezza SOLO se nessuna shot e' lunga quanto lui
     # (sarebbe un taglio in piu' rispetto ai marker), e mai sotto MIN_CUT.
-    shot_i = [0]
-    read_pos = {}          # id(shot) -> secondi gia' usati di quella shot (in questo giro)
+    # Nuovo giro (riusa): ordine DIVERSO dal giro prima e ogni shot riparte da un punto
+    # spostato, cosi' non si rivede lo stesso minuto identico; mai la stessa clip di fila.
+    n_t = len(tape)
+    ckeys = [sh["clip"].GetClipProperty("File Path") or sh["clip"].GetName() for sh in tape]
+    lens = [b - a for a, b in ivs if b - a > 0]
+    avg_cut = sum(lens) / len(lens) if lens else 1.0
+    order = list(range(n_t))   # giro 0: l'ordine scelto
+    shot_i = [0]               # posizione in 'order' da cui cercare la prossima shot
+    read_pos = {}              # indice shot -> secondi gia' usati di quella shot (in questo giro)
     exhausted = [False]
-    giri = [0]             # quante volte il materiale nuovo e' finito e si e' ricominciato
+    giri = [0]                 # quante volte il materiale nuovo e' finito e si e' ricominciato
+    last = [None]              # clip dell'ultimo stacco
 
-    def remaining(sh):
-        return sh["out"] - sh["in"] - read_pos.get(id(sh), 0.0)
+    def remaining(k):
+        return tape[k]["out"] - tape[k]["in"] - read_pos.get(k, 0.0)
 
-    def take(sh, amount):
-        start = sh["in"] + read_pos.get(id(sh), 0.0)
-        read_pos[id(sh)] = start + amount - sh["in"]
+    def take(k, amount):
+        sh = tape[k]
+        start = sh["in"] + read_pos.get(k, 0.0)
+        read_pos[k] = start + amount - sh["in"]
+        last[0] = ckeys[k]
         return (sh["clip"], sh["fps"], start, start + amount)
 
     def find_whole(need):
-        for k in range(len(tape)):
-            idx = (shot_i[0] + k) % len(tape)
-            if remaining(tape[idx]) >= need:
-                return idx
+        for j in range(n_t):
+            p = (shot_i[0] + j) % n_t
+            if remaining(order[p]) >= need - 1e-4:   # (tolleranza: errori di arrotondamento)
+                return p
         return None
+
+    def next_round():
+        giri[0] += 1
+        order[:] = new_round(n_t, giri[0], seed, last[0], ckeys)
+        shot_i[0] = 0
+        off = (giri[0] * PHI % 1.0) * avg_cut
+        read_pos.clear()
+        for k in range(n_t):
+            if tape[k]["out"] - tape[k]["in"] - off >= MIN_CUT:
+                read_pos[k] = off
 
     def pull(length):
         """Lista di (clip, fps, src_in, src_out) lunga length s."""
-        idx = find_whole(length)
-        if idx is None and reuse:
-            read_pos.clear()                    # materiale nuovo finito: nuovo giro
-            giri[0] += 1
-            idx = find_whole(length)
-        if idx is not None:
-            shot_i[0] = idx + 1
-            return [take(tape[idx], length)]
+        p = find_whole(length)
+        if p is None and reuse:
+            next_round()                        # materiale nuovo finito: nuovo giro
+            p = find_whole(length)
+            if p is None:                       # con lo spostamento non entra: da capo
+                read_pos.clear()
+                p = find_whole(length)
+        if p is not None:
+            shot_i[0] = p + 1
+            return [take(order[p], length)]
         # Nessuna shot copre lo stacco da sola (es. un'intro lunga senza beat): lo si
         # divide in parti UGUALI, mai piu' corte di MIN_CUT; se non si puo', si chiude.
-        longest = max(remaining(s) for s in tape)
+        longest = max(remaining(k) for k in range(n_t))
         n = int(math.ceil(length / longest - 1e-9)) if longest > 0.02 else 0
         if not n or length / n < MIN_CUT:
             exhausted[0] = True
@@ -1861,12 +1943,12 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
         part = length / n
         pieces = []
         for _ in range(n):
-            idx = find_whole(part)
-            if idx is None:                     # stacco monco: si chiude su quello prima
+            p = find_whole(part)
+            if p is None:                       # stacco monco: si chiude su quello prima
                 exhausted[0] = True
                 return []
-            shot_i[0] = idx + 1
-            pieces.append(take(tape[idx], part))
+            shot_i[0] = p + 1
+            pieces.append(take(order[p], part))
         return pieces
 
     ok, rep = 0, 0
