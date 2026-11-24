@@ -15,7 +15,7 @@
 
 ---
 
-> **Fa parte di PlutoniCut**: la casa di tutti gli strumenti Plutonic in un'unica finestra (BeaTonic, PlutonicEdit, SubFinder). Si consiglia di installare quella; questo strumento funziona anche da solo.
+> **Fa parte di [PlutoniCut](https://github.com/blueMeth-vfx/PlutoniCut)**: la casa di tutti gli strumenti Plutonic in un'unica finestra (BeaTonic, PlutonicEdit, SubFinder). Si consiglia di installare quella; questo strumento funziona anche da solo.
 
 ## Cos'è
 
