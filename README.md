@@ -15,6 +15,8 @@
 
 ---
 
+> **Fa parte di PlutoniCut**: la casa di tutti gli strumenti Plutonic in un'unica finestra (BeaTonic, PlutonicEdit, SubFinder). Si consiglia di installare quella; questo strumento funziona anche da solo.
+
 ## Cos'è
 
 **BeaTonic** crea un **montaggio ritmato a tempo di musica**. Gli dai delle clip

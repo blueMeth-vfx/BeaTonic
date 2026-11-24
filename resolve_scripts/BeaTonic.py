@@ -2964,6 +2964,8 @@ body.look-notte { --stripA: #F7A541; --stripB: #2A0B4A; }
 @media (max-width: 1100px) { .presets { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .row, .makerow { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { .presets { grid-template-columns: 1fr; } }
+html.embed .top, html.embed #bQuit { display: none !important; }
+html.embed .grid { padding-top: 18px; }
 </style>
 </head>
 <body class="look-studio" data-look="studio">
@@ -3199,6 +3201,9 @@ async function poll() {
   setTimeout(poll, ST && ST.busy ? 300 : 700);
 }
 for (const b of document.querySelectorAll(".looks button")) b.onclick = () => { setLook(b.dataset.look); push(); };
+// Dentro PlutoniCut (la casa degli strumenti): niente intestazione propria, l'aspetto arriva dalla casa
+if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
+window.addEventListener("message", e => { if (e.data && e.data.look) setLook(e.data.look); });
 for (const k of ["reuse", "full", "fit", "pin"]) $(k).onclick = e => { e.preventDefault(); $(k).classList.toggle("on"); push(); if (ST) render(); };
 $("dur").addEventListener("change", push);
 $("dur").addEventListener("input", () => { lastLocal = Date.now(); });
@@ -3213,18 +3218,25 @@ poll();
 """
 
 
-def main():
-    """Avvia il server, apre il pannello ed esegue i comandi finche' c'e' almeno una
-    finestra di BeaTonic aperta (pannello o editor): poi si chiude da solo."""
+QUIET = ()        # comandi istantanei (niente indicatore di lavoro)
+
+
+def setup():
+    """Prepara BeaTonic (impostazioni, selezione del Media Pool): da solo o dentro PlutoniCut (la casa degli strumenti)."""
     os.makedirs(WEB, exist_ok=True)
     _load_settings()
     try:
         on_refresh()
     except Exception:
         pass
-    set_log("1) Seleziona nel Media Pool le clip video + la canzone   2) Analizza\n"
-            "3) Scegli stile, formato, durata e ordine   4) Facoltativi: adatta la canzone, "
-            "editor dei marker   5) Monta.")
+    set_log("1) Seleziona nel Media Pool le clip video + la canzone   2) Imposta durata, ritmo, "
+            "formato e ordine   3) Analizza   4) Scegli il montaggio: aprilo nell'editor o Monta.")
+
+
+def main():
+    """Avvia il server, apre il pannello ed esegue i comandi finche' c'e' almeno una
+    finestra di BeaTonic aperta (pannello o editor): poi si chiude da solo."""
+    setup()
     port = start_server()
     print("BeaTonic: pannello su http://127.0.0.1:%d/" % port)
     _open_window(_url(), (1180, 860))
