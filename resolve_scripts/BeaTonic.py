@@ -242,7 +242,10 @@ def _tempo(o, fps):
     for lag in range(max(1, lo - 1), min(hi + 1, n - 1) + 1):
         ac[lag] = sum(map(operator.mul, x[lag:], x[:-lag]))
     best, bl = None, lo
-    for lag in range(lo, hi + 1):
+    peaks = [lag for lag in range(lo, hi + 1)          # solo i picchi veri: il bordo dell'intervallo
+             if lag in ac and ac.get(lag - 1, -1e18) <= ac[lag] >= ac.get(lag + 1, -1e18)
+             and lag - 1 in ac and lag + 1 in ac]      # (dove l'autocorrelazione scende e basta) no
+    for lag in (peaks or range(lo, hi + 1)):
         if lag not in ac:
             continue
         bpm = 60.0 * fps / lag
@@ -256,8 +259,9 @@ def _tempo(o, fps):
     elif bpm > 165 and dbl in ac and ac[dbl] > 0.5 * ac[bl]:
         bl = dbl                                    # troppo veloce: dimezza
     a, b, c = ac.get(bl - 1), ac.get(bl), ac.get(bl + 1)
-    if a is not None and c is not None and (a - 2 * b + c) != 0:
-        return bl + 0.5 * (a - c) / (a - 2 * b + c)  # periodo frazionario
+    if a is not None and c is not None and b >= a and b >= c and (a - 2 * b + c) < 0:
+        d = 0.5 * (a - c) / (a - 2 * b + c)        # periodo frazionario (solo su un picco vero,
+        return bl + max(-0.5, min(0.5, d))          # e mai piu' di mezzo passo)
     return float(bl)
 
 
@@ -2510,9 +2514,11 @@ def _tl_tracks(tl):
 
 
 def _tl_song_items(tl, track):
-    """Pezzi della canzone sulla traccia: (inizio, fine, s nel file, durata s, file, nome)."""
+    """Pezzi della canzone sulla traccia: (inizio, fine, s nel file, durata s, file, nome).
+    Se un pezzo non ha un file (clip composto, come quello che fa il remix AI di Resolve)
+    i pezzi veri si leggono dall'export OTIO della timeline, che apre i composti."""
     fps = _tl_fps(tl)
-    out = []
+    out, nested = [], False
     for it in tl.GetItemListInTrack("audio", track) or []:
         try:
             if not it.GetClipEnabled():
@@ -2521,6 +2527,8 @@ def _tl_song_items(tl, track):
             pass
         mpi = it.GetMediaPoolItem()
         path = mpi.GetClipProperty("File Path") if mpi else ""
+        if not path:
+            nested = True
         try:
             cf = float(mpi.GetClipProperty("FPS")) if mpi else 0.0
         except Exception:
@@ -2528,7 +2536,103 @@ def _tl_song_items(tl, track):
         cf = cf if cf > 1 else fps
         s0, e0 = it.GetStart(), it.GetEnd()
         out.append((s0, e0, (it.GetSourceStartFrame() or 0) / cf, (e0 - s0) / fps, path or "", it.GetName()))
+    if nested:
+        try:
+            inner = _otio_song_items(tl, track, fps)
+        except Exception:
+            inner = None
+        if inner:
+            return inner
     return sorted(out)
+
+
+# --- dentro i clip composti: l'export OTIO della timeline (Resolve 18.5+) ---
+def _otio_s(rt):
+    """RationalTime OTIO in secondi."""
+    try:
+        return float(rt["value"]) / float(rt["rate"])
+    except Exception:
+        return 0.0
+
+
+def _otio_ref(clip):
+    refs = clip.get("media_references") or {}
+    ref = clip.get("media_reference") or refs.get(clip.get("active_media_reference_key") or "DEFAULT_MEDIA")
+    if not ref and refs:
+        ref = next(iter(refs.values()))
+    ref = ref or {}
+    url = ref.get("target_url") or ""
+    if url.lower().startswith("file:"):
+        from urllib.parse import unquote, urlparse
+        url = unquote(urlparse(url).path)
+        if re.match(r"^/[A-Za-z]:", url):
+            url = url[1:]
+    return url, ref
+
+
+def _otio_len(o):
+    """Durata (s) di un elemento OTIO: il suo source_range o, per uno Stack, la traccia piu' lunga."""
+    sr = o.get("source_range")
+    if sr:
+        return _otio_s(sr.get("duration"))
+    sch = o.get("OTIO_SCHEMA", "")
+    kids = [k for k in o.get("children") or [] if not k.get("OTIO_SCHEMA", "").startswith("Transition")]
+    if sch.startswith("Stack"):
+        return max([_otio_len(k) for k in kids] or [0.0])
+    return sum(_otio_len(k) for k in kids)
+
+
+def _otio_track(tr, t0, a, b, out):
+    """Pezzi audio di una traccia OTIO visti nella finestra [a, b) del suo tempo, messi da t0 (s)."""
+    pos = 0.0
+    for it in tr.get("children") or []:
+        sch = it.get("OTIO_SCHEMA", "")
+        if sch.startswith("Transition"):          # le dissolvenze non occupano tempo: taglio netto
+            continue
+        dur = _otio_len(it)
+        lo, hi = max(pos, a), min(pos + dur, b)
+        if hi > lo and it.get("enabled", True):
+            sr = it.get("source_range") or {}
+            if sch.startswith("Clip"):
+                path, ref = _otio_ref(it)
+                av = ref.get("available_range") or {}
+                src = _otio_s(sr.get("start_time")) - (_otio_s(av.get("start_time")) if av else 0.0)
+                out.append((t0 + lo - a, t0 + hi - a, max(0.0, src + lo - pos), hi - lo, path, it.get("name") or ""))
+            elif sch.startswith("Stack"):         # composto dentro: si apre anche lui
+                ss = _otio_s(sr.get("start_time")) if sr else 0.0
+                _otio_stack(it, t0 + lo - a, ss + lo - pos, ss + hi - pos, out)
+        pos += dur
+
+
+def _otio_stack(st, t0, a, b, out):
+    for tr in st.get("children") or []:
+        if tr.get("OTIO_SCHEMA", "").startswith("Track") and tr.get("kind") == "Audio" and tr.get("enabled", True):
+            _otio_track(tr, t0, a, b, out)
+
+
+def _otio_song_items(tl, track, fps):
+    """Come _tl_song_items, ma dall'export OTIO: i composti vengono aperti fino ai file veri."""
+    kind = getattr(resolve, "EXPORT_OTIO", None)
+    if kind is None:
+        return None
+    os.makedirs(_TMP, exist_ok=True)
+    path = os.path.join(_TMP, "timeline_export.otio")
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    if not tl.Export(path, kind) or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    audio = [t for t in (d.get("tracks") or {}).get("children") or [] if t.get("kind") == "Audio"]
+    if track > len(audio):
+        return None
+    secs = []
+    _otio_track(audio[track - 1], 0.0, 0.0, 1e9, secs)
+    t0 = tl.GetStartFrame()
+    out = [(t0 + a * fps, t0 + b * fps, src, dur, p, n) for a, b, src, dur, p, n in secs if b > a]
+    return sorted(out) or None
 
 
 def _pick_track(tl):
@@ -2624,10 +2728,14 @@ def _tl_prepare():
     sig = json.dumps([tl.GetUniqueId(), track, items])
     import hashlib
     out = os.path.join(_TMP, "timeline_%s.wav" % hashlib.md5(sig.encode("utf-8")).hexdigest()[:12])
-    missing = []
+    missing = [n for _, _, _, _, p, n in items if not p or not os.path.exists(p)]
+    if len(missing) == len(items):
+        return None, ("Non trovo il file audio della canzone sulla traccia A%d di «%s» (%s). "
+                      "Se è un clip composto, aprilo e controlla che i pezzi puntino a un file "
+                      "presente sul disco." % (track, tl.GetName(), ", ".join(sorted(set(missing))[:3])))
     if not os.path.exists(out):
         os.makedirs(_TMP, exist_ok=True)
-        missing = _render_tl_song(items, start, fps, out + ".tmp")
+        _render_tl_song(items, start, fps, out + ".tmp")
         os.replace(out + ".tmp", out)
     try:
         w, h = int(tl.GetSetting("timelineResolutionWidth")), int(tl.GetSetting("timelineResolutionHeight"))
@@ -2741,6 +2849,11 @@ def on_analyze(ev):
     if not BEATS:
         set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
         _use_song(SONG, analyze=True)
+    if not BEATS:                        # senza beat non ci sono montaggi da proporre
+        set_log("Nella canzone «%s» non sento nessun beat (audio muto o non leggibile): "
+                "niente montaggi da proporre. Controlla la canzone e premi di nuovo Analizza." % SONG.GetName())
+        set_status("Analisi: nessun beat nella canzone.")
+        return
     fit_log = ""
     if SET["src"] == "timeline":
         fit_log = ("\n\nCanzone dalla timeline «%s», traccia A%d (%d pezzi): il montato andrà in una "
