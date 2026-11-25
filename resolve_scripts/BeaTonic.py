@@ -1867,7 +1867,7 @@ def editor_marks():
     return sorted(float(t) for t in d.get("marks", []) if float(t) > 0)
 
 
-def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, name=None):
+def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, name=None, onto=None):
     """Monta le shot negli intervalli ivs [(inizio s, fine s), ...] che partono da 0.
     Ogni stacco cade ESATTAMENTE sul suo fotogramma: dopo ogni clip si legge dove e'
     finita davvero e la successiva si calcola per arrivare al punto dopo (nessuno
@@ -1880,19 +1880,44 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
         return "Nessun punto di stacco."
     tape = order_shots(shots, order_mode, seed)
 
-    new = _new_timeline(mp, name or "BeaTonic_%s" % tag)   # nome scelto, o automatico
-    if new is None:
-        return "Impossibile creare la timeline."
-    W, H = FORMATS.get(fmt, (1920, 1080))
-    try:
-        new.SetSetting("useCustomSettings", "1")
-        new.SetSetting("timelineResolutionWidth", str(W))
-        new.SetSetting("timelineResolutionHeight", str(H))
-    except Exception:
-        pass
-    proj.SetCurrentTimeline(new)
-    tl_fps = _tl_fps(new)
-    ns = new.GetStartFrame()
+    vtrack = 1
+    if onto:                     # canzone dalla timeline: si monta in una COPIA, sopra di lei
+        src_tl = _find_timeline(onto["tl_id"])
+        if src_tl is None:
+            return "Non trovo più la timeline «%s» della canzone." % onto["tl_name"]
+        new = None
+        base = name or "%s BeaTonic %s" % (onto["tl_name"], tag)
+        for k in range(1, 100):
+            new = src_tl.DuplicateTimeline(base if k == 1 else "%s_%d" % (base, k))
+            if new:
+                break
+        if new is None:
+            return "Impossibile copiare la timeline «%s»." % onto["tl_name"]
+        COPIES.add(new.GetUniqueId())
+        proj.SetCurrentTimeline(new)
+        new.AddTrack("video")
+        vtrack = new.GetTrackCount("video")
+        try:
+            new.SetTrackName("video", vtrack, "BeaTonic")
+        except Exception:
+            pass
+        tl_fps = _tl_fps(new)
+        ns = onto["start"]
+        fmt = "%dx%d (della timeline)" % (onto["w"], onto["h"])
+    else:
+        new = _new_timeline(mp, name or "BeaTonic_%s" % tag)   # nome scelto, o automatico
+        if new is None:
+            return "Impossibile creare la timeline."
+        W, H = FORMATS.get(fmt, (1920, 1080))
+        try:
+            new.SetSetting("useCustomSettings", "1")
+            new.SetSetting("timelineResolutionWidth", str(W))
+            new.SetSetting("timelineResolutionHeight", str(H))
+        except Exception:
+            pass
+        proj.SetCurrentTimeline(new)
+        tl_fps = _tl_fps(new)
+        ns = new.GetStartFrame()
 
     # Ogni stacco = UNA shot che lo copre tutto (niente code di pochi fotogrammi).
     # Si parte dalla shot successiva nell'ordine scelto, quindi due stacchi di fila
@@ -2002,7 +2027,9 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
             sf = int(round(si * cfps))
             ef = sf + max(1, int(round(plen * cfps / tl_fps)))
             info = {"mediaPoolItem": clip, "startFrame": sf, "endFrame": ef,
-                    "trackIndex": 1, "mediaType": 1}
+                    "trackIndex": vtrack, "mediaType": 1}
+            if onto:                            # nella copia: al suo posto preciso
+                info["recordFrame"] = cur
             try:
                 items = mp.AppendToTimeline([info])   # SEQUENZIALE = senza buchi
             except Exception:
@@ -2017,7 +2044,8 @@ def montage(shots, song, ivs, tag, fmt, order_mode, reuse, set_log, seed=None, n
         if exhausted[0]:
             break
     frames = cur - ns
-    _put_song(mp, song, ns, frames)             # canzone su A1, lunga quanto il montaggio
+    if not onto:
+        _put_song(mp, song, ns, frames)         # canzone su A1, lunga quanto il montaggio
     # Riepilogo: si capisce subito se il materiale basta o se si e' dovuto ripetere
     total = sum(s["out"] - s["in"] for s in shots)
     nclip = len(set(s["clip"].GetName() for s in shots))
@@ -2318,7 +2346,8 @@ def save_theme(name):
 
 SET = {"sens": "Media (consigliata)", "style": list(STYLES)[0], "fmt": list(FORMATS)[0],
        "ord": list(ORDERS)[0], "dur": 30.0, "reuse": True, "look": load_theme(),
-       "tlname": "", "ontop": True, "full": False, "fit": False}
+       "tlname": "", "ontop": True, "full": False, "fit": False,
+       "src": "pool", "track": 0}    # canzone dal Media Pool o da una traccia della timeline
 _CHOICES = {"sens": SENS, "style": STYLES, "fmt": FORMATS, "ord": ORDERS}
 
 
@@ -2336,6 +2365,13 @@ def _apply_settings(d, save=True):
     for k in ("reuse", "full", "fit"):     # full = canzone intera; fit = adatta la canzone
         if k in d:
             SET[k] = bool(d[k])
+    if d.get("src") in ("pool", "timeline"):
+        SET["src"] = d["src"]
+    try:
+        if "track" in d:
+            SET["track"] = max(0, min(99, int(d["track"])))   # 0 = la prima con la canzone
+    except (TypeError, ValueError):
+        pass
     if isinstance(d.get("tlname"), str):          # nome della timeline ("" = automatico)
         SET["tlname"] = re.sub(r'[\\/:*?"<>|]', "", d["tlname"]).strip()[:80]
     if "ontop" in d and bool(d["ontop"]) != SET["ontop"]:
@@ -2424,6 +2460,188 @@ def _use_song(item, analyze=False):
     STATE["sel"] = {"videos": STATE["sel"]["videos"], "song": item.GetName() if item else ""}
 
 
+# --------------------------------------------------------------------------
+# Canzone dalla timeline: per esempio rimontata in Resolve con l'AI Music Editor.
+# L'audio della traccia scelta viene ricostruito con ffmpeg (ogni pezzo dal suo file,
+# al suo posto) solo per sentirne i beat; il montato va in una COPIA della timeline,
+# sopra la canzone vera, che resta quella di Resolve.
+# --------------------------------------------------------------------------
+TLSONG = {}         # canzone dalla timeline in uso: tl_id, tl_name, track, start, end, fps, item, w, h
+TL_INFO = {"name": "", "tracks": []}   # tracce audio della timeline aperta (per il pannello)
+TL_SR = 44100
+
+
+class _FileSong(object):
+    """Un file audio fatto da BeaTonic, usato come se fosse una clip del Media Pool."""
+
+    def __init__(self, path, name):
+        self.path, self.name = path, name
+
+    def GetName(self):
+        return self.name
+
+    def GetClipProperty(self, key=None):
+        props = {"File Path": self.path, "Type": "Audio"}
+        return props if key is None else props.get(key, "")
+
+
+def _find_timeline(tl_id):
+    pj = resolve.GetProjectManager().GetCurrentProject()
+    for i in range(1, (pj.GetTimelineCount() or 0) + 1):
+        t = pj.GetTimelineByIndex(i)
+        try:
+            if t and t.GetUniqueId() == tl_id:
+                return t
+        except Exception:
+            pass
+    return None
+
+
+def _tl_tracks(tl):
+    """Tracce audio della timeline: [{"i", "name", "n" (clip)}]."""
+    out = []
+    for i in range(1, (tl.GetTrackCount("audio") or 0) + 1):
+        try:
+            name = tl.GetTrackName("audio", i) or "A%d" % i
+        except Exception:
+            name = "A%d" % i
+        out.append({"i": i, "name": name, "n": len(tl.GetItemListInTrack("audio", i) or [])})
+    return out
+
+
+def _tl_song_items(tl, track):
+    """Pezzi della canzone sulla traccia: (inizio, fine, s nel file, durata s, file, nome)."""
+    fps = _tl_fps(tl)
+    out = []
+    for it in tl.GetItemListInTrack("audio", track) or []:
+        try:
+            if not it.GetClipEnabled():
+                continue                 # clip spenta: non si sente
+        except Exception:
+            pass
+        mpi = it.GetMediaPoolItem()
+        path = mpi.GetClipProperty("File Path") if mpi else ""
+        try:
+            cf = float(mpi.GetClipProperty("FPS")) if mpi else 0.0
+        except Exception:
+            cf = 0.0
+        cf = cf if cf > 1 else fps
+        s0, e0 = it.GetStart(), it.GetEnd()
+        out.append((s0, e0, (it.GetSourceStartFrame() or 0) / cf, (e0 - s0) / fps, path or "", it.GetName()))
+    return sorted(out)
+
+
+def _pick_track(tl):
+    """La traccia scelta, o (automatico) la prima con delle clip."""
+    tracks = _tl_tracks(tl)
+    if SET["track"] and any(t["i"] == SET["track"] for t in tracks):
+        return SET["track"]
+    return next((t["i"] for t in tracks if t["n"]), 0)
+
+
+def _render_tl_song(items, start, fps, out):
+    """Ricostruisce l'audio della traccia (mono 44,1 kHz) in un WAV: ogni pezzo dal suo file
+    al suo posto, i pezzi che si sovrappongono (dissolvenze) si sommano."""
+    end = max(e for _, e, _, _, _, _ in items)
+    n = int(round((end - start) / fps * TL_SR))
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    buf = np.zeros(n, dtype=np.float32) if np is not None else [0.0] * n
+    missing = []
+    for s0, e0, src, dur, path, name in items:
+        if not path or not os.path.exists(path):
+            missing.append(name)
+            continue
+        raw = subprocess.run([FFMPEG, "-v", "error", "-ss", "%.4f" % max(0.0, src), "-t", "%.4f" % dur, "-i", path,
+                              "-vn", "-ac", "1", "-ar", str(TL_SR), "-f", "s16le", "-"],
+                             capture_output=True, stdin=subprocess.DEVNULL, creationflags=_NOWIN).stdout
+        off = int(round((s0 - start) / fps * TL_SR))
+        m = max(0, min(len(raw) // 2, n - off))
+        if np is not None:
+            buf[off:off + m] += np.frombuffer(raw[:m * 2], dtype="<i2").astype(np.float32)
+        else:
+            seg = struct.unpack("<%dh" % m, raw[:m * 2])
+            for j, v in enumerate(seg):
+                buf[off + j] += v
+    if np is not None:
+        data = np.clip(buf, -32768, 32767).astype("<i2").tobytes()
+    else:
+        data = struct.pack("<%dh" % n, *[int(max(-32768, min(32767, v))) for v in buf])
+    w = wave.open(out, "wb")
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(TL_SR)
+    w.writeframes(data)
+    w.close()
+    return missing
+
+
+COPIES = set()      # timeline copiate da BeaTonic per montarci sopra
+
+
+def _tl_source():
+    """La timeline della canzone: quella aperta; se e' una copia fatta da BeaTonic,
+    l'originale (cosi' non si monta sopra un montato)."""
+    try:
+        tl = resolve.GetProjectManager().GetCurrentProject().GetCurrentTimeline()
+    except Exception:
+        return None
+    try:
+        if tl and tl.GetUniqueId() in COPIES and TLSONG:
+            return _find_timeline(TLSONG["tl_id"]) or tl
+    except Exception:
+        pass
+    return tl
+
+
+def _tl_read():
+    """Legge la timeline della canzone (nome e tracce audio) per il pannello."""
+    tl = _tl_source()
+    if not tl:
+        TL_INFO.update(name="", tracks=[], track=0)
+        return None
+    TL_INFO.update(name=tl.GetName(), tracks=_tl_tracks(tl), track=_pick_track(tl))
+    return tl
+
+
+def _tl_prepare():
+    """Prepara la canzone dalla timeline aperta (traccia scelta). Ritorna (canzone, errore)."""
+    tl = _tl_read()
+    if not tl:
+        return None, "Apri in Resolve la timeline con la canzone."
+    track = TL_INFO["track"]
+    if not track:
+        return None, "La timeline «%s» non ha clip audio: mettici la canzone." % tl.GetName()
+    items = _tl_song_items(tl, track)
+    if not items:
+        return None, "Sulla traccia A%d di «%s» non c'è audio acceso." % (track, tl.GetName())
+    if not FFMPEG:
+        return None, "ffmpeg non trovato: serve per ascoltare la canzone."
+    fps = _tl_fps(tl)
+    start, end = items[0][0], max(e for _, e, _, _, _, _ in items)
+    sig = json.dumps([tl.GetUniqueId(), track, items])
+    import hashlib
+    out = os.path.join(_TMP, "timeline_%s.wav" % hashlib.md5(sig.encode("utf-8")).hexdigest()[:12])
+    missing = []
+    if not os.path.exists(out):
+        os.makedirs(_TMP, exist_ok=True)
+        missing = _render_tl_song(items, start, fps, out + ".tmp")
+        os.replace(out + ".tmp", out)
+    try:
+        w, h = int(tl.GetSetting("timelineResolutionWidth")), int(tl.GetSetting("timelineResolutionHeight"))
+    except Exception:
+        w, h = 1920, 1080
+    name = "%s · %s" % (tl.GetName(), TL_INFO["tracks"][track - 1]["name"])
+    TLSONG.clear()
+    TLSONG.update(tl_id=tl.GetUniqueId(), tl_name=tl.GetName(), track=track, start=start, end=end, fps=fps,
+                  item=_FileSong(out, name), n=len(items), w=w, h=h)
+    err = ("Attenzione: %d pezzi senza file leggibile (%s) restano muti nell'analisi." % (
+        len(missing), ", ".join(missing[:3]))) if missing else ""
+    return TLSONG["item"], err
+
+
 def _sync_shots():
     """Pezzi video delle clip selezionate presi dalla memoria; False se qualcuna e' da analizzare."""
     global SHOTS
@@ -2459,7 +2677,8 @@ def _state():
                      "beats": len(BEATS), "bars": sum(1 for p in BPOS if p == 0),
                      "song_len": SONG_LEN[0], "fitted": bool(FITTED),
                      "orig": FITTED.get("orig_name", ""), "stale": _song_stale(),
-                     "dur": _dur(),
+                     "dur": _dur(), "src": SET["src"], "tl": TL_INFO,
+                     "tlsong": ({"name": TLSONG["tl_name"], "track": TLSONG["track"]} if TLSONG else None),
                      "marks": len(saved) if saved is not None else len(MARKS)}}
 
 
@@ -2469,6 +2688,17 @@ def on_refresh(ev=None):
     global VIDEOS
     VIDEOS, sel = selection()
     song = sel
+    if SET["src"] == "timeline":
+        STATE["sel"] = {"videos": [c.GetName() for c in VIDEOS], "song": ""}
+        tl = _tl_read()
+        same = (TLSONG and tl and TLSONG["tl_id"] == tl.GetUniqueId() and TLSONG["track"] == TL_INFO["track"])
+        _use_song(TLSONG["item"] if same else None)
+        _sync_shots()
+        set_status("Selezione: %d clip video · canzone dalla timeline: %s" % (
+            len(VIDEOS), ("«%s» A%d" % (TL_INFO["name"], TL_INFO["track"])) if TL_INFO["track"] else "nessuna"))
+        if not FFMPEG:
+            set_log("ffmpeg NON trovato. Installalo o imposta la variabile FFMPEG col percorso.")
+        return
     if FITTED and (sel is None or _path(sel) in (FITTED["orig"], FITTED["path"])):
         song = FITTED["item"]
     elif FITTED:
@@ -2489,6 +2719,13 @@ def on_analyze(ev):
         set_log("ffmpeg non trovato: impossibile analizzare."); return
     if not VIDEOS:
         set_log("Nessuna clip video selezionata nel Media Pool."); return
+    tl_warn = ""
+    if SET["src"] == "timeline":         # la canzone com'è in timeline (anche rimontata in Resolve)
+        set_status("Ascolto la canzone dalla timeline…")
+        song, tl_warn = _tl_prepare()
+        if song is None:
+            set_log(tl_warn); return
+        _use_song(song)
     if not SONG:
         set_log("Nessuna canzone (clip audio) selezionata nel Media Pool."); return
     params = SENS.get(SET["sens"], SENS["Media (consigliata)"])
@@ -2505,7 +2742,13 @@ def on_analyze(ev):
         set_log("Scene analizzate: %d pezzi video.\nAnalizzo i beat della canzone…" % len(SHOTS))
         _use_song(SONG, analyze=True)
     fit_log = ""
-    if _song_stale():
+    if SET["src"] == "timeline":
+        fit_log = ("\n\nCanzone dalla timeline «%s», traccia A%d (%d pezzi): il montato andrà in una "
+                   "copia della timeline, sopra la canzone, da dove parte lei." % (
+                       TLSONG["tl_name"], TLSONG["track"], TLSONG["n"]))
+        if tl_warn:
+            fit_log += "\n" + tl_warn
+    elif _song_stale():
         if SET["fit"] and not SET["full"]:
             on_fit(None)                 # adatta la canzone alla durata (parte dall'originale)
             fit_log = "\n\n" + STATE["log"]
@@ -2525,8 +2768,8 @@ def on_analyze(ev):
 
 
 def _dur():
-    """Durata del montaggio: quella scelta, o tutta la canzone."""
-    if SET["full"] and SONG_LEN[0] > 0:
+    """Durata del montaggio: quella scelta, o tutta la canzone (sempre, se e' dalla timeline)."""
+    if (SET["full"] or SET["src"] == "timeline") and SONG_LEN[0] > 0:
         return SONG_LEN[0]
     return float(SET["dur"]) if SET["dur"] > 0 else 30.0
 
@@ -2534,6 +2777,8 @@ def _dur():
 def _song_stale():
     """La canzone in uso non corrisponde alle impostazioni (serve 'Analizza')."""
     if not BEATS:
+        return False
+    if SET["src"] == "timeline":
         return False
     if SET["fit"] and not SET["full"]:
         return not FITTED or abs(SONG_LEN[0] - float(SET["dur"])) > 0.05
@@ -2567,6 +2812,8 @@ def on_mark(ev):
     elif not MARKS:
         MARKS[:] = marks_from_beats()
     W, H = FORMATS.get(SET["fmt"], (1920, 1080))
+    if SET["src"] == "timeline" and TLSONG:
+        W, H = TLSONG["w"], TLSONG["h"]
     key = ev if ev in OPT_KEYS else "mine"
     p = _preset(key)
     style = "Proposta " + p[1] if p else SET["style"]   # una proposta apre col suo taglio
@@ -2589,6 +2836,8 @@ def on_fit(ev):
     sentono), la importa nel Media Pool e la usa da qui in poi."""
     if not BEATS or not SONG:
         set_log("Prima premi 'Analizza'."); return
+    if SET["src"] == "timeline":
+        set_log("La canzone viene dalla timeline: la durata è la sua (rimontala in Resolve)."); return
     target = _dur()
     orig = FITTED.get("orig_item") or SONG   # riadattando si riparte SEMPRE dall'originale
     src = _path(orig)
@@ -2716,7 +2965,7 @@ def on_preset_make(key):
     if not p or not SHOTS or not SONG:
         set_log("Prima premi 'Analizza'."); return
     msg = montage(SHOTS, SONG, preset_ivs(key), p[1], SET["fmt"], ORDERS[SET["ord"]],
-                  SET["reuse"], set_log, _seed(key), name=SET["tlname"] or None)
+                  SET["reuse"], set_log, _seed(key), name=SET["tlname"] or None, onto=_onto())
     _reshuffle()
     set_log("%s\nProposta «%s»: %s" % (msg, p[1], p[2]))
     set_status(msg.split("\n")[0][:90])
@@ -2731,8 +2980,9 @@ def on_preset_all(ev=None):
         set_status("Monto la proposta «%s»…" % name)
         msgs.append(montage(SHOTS, SONG, preset_ivs(key), name, SET["fmt"], ORDERS[SET["ord"]],
                             SET["reuse"], set_log, _seed(key),
-                            name="%s %s" % (SET["tlname"], name) if SET["tlname"] else None))
-    base = (SET["tlname"] + " ") if SET["tlname"] else "BeaTonic_"
+                            name="%s %s" % (SET["tlname"], name) if SET["tlname"] else None, onto=_onto()))
+    base = (SET["tlname"] + " ") if SET["tlname"] else (
+        TLSONG["tl_name"] + " BeaTonic " if _onto() else "BeaTonic_")
     set_log("TRE TIMELINE DA CONFRONTARE in Resolve (%sEnergia, %sGroove, %sCinematico):\n\n"
             % (base, base, base) + "\n\n".join(msgs))
     _reshuffle()
@@ -2771,10 +3021,17 @@ def on_make(ev):
     msg = montage(SHOTS, SONG, ivs, tag, SET["fmt"],
                   ORDERS.get(SET["ord"], "nameaz"),
                   SET["reuse"], set_log, _seed(SESS.get("key", "mine") if MARKS else "mine"),
-                  name=SET["tlname"] or None)   # (stesso ordine dell'anteprima dell'editor)
+                  name=SET["tlname"] or None, onto=_onto())   # (stesso ordine dell'anteprima)
     _reshuffle()
     set_log(msg + "\nStacchi presi " + src + ".")
     set_status(msg.split("\n")[0][:90])
+
+
+def _onto():
+    """Dove montare se la canzone viene dalla timeline (None: timeline nuova)."""
+    if SET["src"] == "timeline" and TLSONG and SONG is TLSONG.get("item"):
+        return TLSONG
+    return None
 
 
 def on_close(ev=None):
@@ -2982,7 +3239,12 @@ html.embed .grid { padding-top: 18px; }
 </header>
 <main class="grid">
   <section class="card">
-    <h2><span class="n">1</span> Materiale dal Media Pool</h2>
+    <h2><span class="n">1</span> Materiale</h2>
+    <div class="seg" id="src">
+      <button data-v="pool"><b>Canzone dal Media Pool</b><small>la selezioni insieme alle clip</small></button>
+      <button data-v="timeline"><b>Canzone dalla timeline</b><small>com'è in Resolve, anche rimontata</small></button>
+    </div>
+    <div id="trackBox" hidden><label>Traccia della canzone nella timeline <b id="tlName"></b></label><div class="seg" id="track"></div></div>
     <div class="tiles">
       <div class="tile"><div class="k">Clip video</div><div class="v" id="nVid">0</div><div class="sub" id="vidNames">—</div></div>
       <div class="tile"><div class="k">Canzone</div><div class="v song" id="songName">—</div><div class="sub" id="songInfo"></div></div>
@@ -3047,7 +3309,7 @@ html.embed .grid { padding-top: 18px; }
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const BUSY = {refresh: "Leggo la selezione dal Media Pool…", analyze: "Analisi in corso: scene, beat e (se serve) canzone adattata…",
+const BUSY = {refresh: "Leggo la selezione e la timeline…", analyze: "Analisi in corso: scene, beat e (se serve) canzone adattata…",
   mark: "Apro l'editor dei marker…", make: "Monto la timeline in Resolve…", quit: "Chiudo…",
   preset_edit: "Apro il montaggio nell'editor…", preset_make: "Monto la timeline in Resolve…",
   preset_all: "Monto le tre proposte in Resolve…"};
@@ -3066,12 +3328,13 @@ function seg(id, opts, val, short) {
     b.innerHTML = "<b>" + esc(t) + "</b>" + (s ? "<small>" + esc(s) + "</small>" : "");
     b.dataset.v = o;
     b.classList.toggle("on", o === val);
-    b.onclick = () => { for (const x of el.children) x.classList.toggle("on", x === b); push(); };
+    b.onclick = () => { for (const x of el.children) x.classList.toggle("on", x === b); push(); if (id === "track") cmd("refresh"); };
     el.appendChild(b);
   }
 }
 const pick = id => { const b = $(id).querySelector(".on"); return b ? b.dataset.v : ""; };
 const collect = () => ({sens: pick("sens"), style: pick("style"), fmt: pick("fmt"), ord: pick("ord"),
+  src: pick("src") || "pool", track: parseInt(pick("track") || "0", 10) || 0,
   dur: parseFloat($("dur").value) || 30, reuse: on("reuse"), full: on("full"), fit: on("fit"),
   tlname: $("tlname").value, ontop: on("pin"), look: document.body.dataset.look});
 function push() { lastLocal = Date.now(); fetch("/api/set", {method: "POST", body: JSON.stringify(collect())}).catch(() => {}); }
@@ -3083,8 +3346,9 @@ function cmd(c, arg) {
 }
 function syncControls() {                     // il plugin puo' cambiare le impostazioni
   if (Date.now() - lastLocal < 2000) return;
-  for (const k of ["sens", "style", "fmt", "ord"])
-    for (const b of $(k).children) b.classList.toggle("on", b.dataset.v === ST.set[k]);
+  for (const k of ["sens", "style", "fmt", "ord", "src"])
+    for (const b of $(k).children) b.classList.toggle("on", b.dataset.v === String(ST.set[k]));
+  for (const b of $("track").children) b.classList.toggle("on", b.dataset.v === String(ST.set.track || 0));
   if (document.activeElement !== $("dur")) $("dur").value = Math.round(ST.set.dur * 100) / 100;
   if (document.activeElement !== $("tlname")) $("tlname").value = ST.set.tlname || "";
   for (const k of ["reuse", "full", "fit"]) $(k).classList.toggle("on", !!ST.set[k]);
@@ -3155,17 +3419,46 @@ function init() {
   syncControls();
   setLook(s.look || "studio");
 }
+let trackSig = "";
+function renderTracks(tl) {                   // le tracce audio della timeline, come pulsanti
+  const sig = JSON.stringify(tl);
+  if (sig === trackSig) return;
+  trackSig = sig;
+  const opts = ["0"].concat((tl.tracks || []).map(t => String(t.i)));
+  seg("track", opts, String(ST.set.track || 0), x => {
+    if (x === "0") return "Automatica (" + (tl.track ? "A" + tl.track : "nessuna") + ")";
+    const t = tl.tracks[+x - 1];
+    return "A" + t.i + " (" + t.name + " · " + t.n + " clip)";
+  });
+}
 function render() {
-  const v = ST.sel.videos || [], inf = ST.info;
+  const v = ST.sel.videos || [], inf = ST.info, tlm = pick("src") === "timeline", tl = inf.tl || {};
   $("nVid").textContent = v.length;
   $("vidNames").textContent = v.length ? v.slice(0, 3).join(" · ") + (v.length > 3 ? " +" + (v.length - 3) : "") : "selezionale nel Media Pool";
-  $("songName").textContent = ST.sel.song || "—";
-  $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata" : "") : "da analizzare")
-                                          : "selezionala nel Media Pool";
-  const full = on("full"), fit = on("fit");
+  $("trackBox").hidden = !tlm;
+  if (tlm) {
+    renderTracks(tl);
+    $("tlName").textContent = tl.name ? "«" + tl.name + "»" : "(nessuna aperta)";
+    $("songName").textContent = tl.track ? (tl.name + " · A" + tl.track) : "—";
+    $("songInfo").textContent = !tl.name ? "apri in Resolve la timeline con la canzone" : !tl.track ? "la timeline non ha audio"
+                               : inf.song_len && inf.tlsong ? mmss(inf.song_len) + " · dalla timeline" : "si ascolta all'Analizza";
+  } else {
+    $("songName").textContent = ST.sel.song || "—";
+    $("songInfo").textContent = ST.sel.song ? (inf.song_len ? mmss(inf.song_len) + (inf.fitted ? " · adattata" : "") : "da analizzare")
+                                            : "selezionala nel Media Pool";
+  }
+  const full = on("full") || tlm, fit = on("fit") && !tlm;
   $("dur").disabled = full;
+  $("full").parentElement.style.opacity = tlm ? .45 : 1;
+  $("full").disabled = tlm;
+  $("fit").disabled = tlm;
   $("fit").parentElement.style.opacity = full ? .45 : 1;
-  $("songBox").innerHTML = !inf.song_len ? "Dopo l'analisi qui vedi quanto dura la canzone in uso." :
+  $("fmt").style.opacity = tlm ? .45 : 1;
+  $("fmt").style.pointerEvents = tlm ? "none" : "";
+  $("fmt").title = tlm ? "Con la canzone dalla timeline il formato è quello della tua timeline" : "";
+  $("songBox").innerHTML = tlm ? "La canzone viene dalla timeline: il montaggio <b>dura quanto lei</b> e va in una <b>copia della timeline</b>, " +
+      "su una traccia video nuova sopra la canzone, da dove parte lei. Formato: quello della timeline." :
+    !inf.song_len ? "Dopo l'analisi qui vedi quanto dura la canzone in uso." :
     inf.fitted ? "In uso: <b>versione adattata a " + inf.song_len.toFixed(1).replace(".", ",") + " s</b> (originale «" + esc(inf.orig) + "»)."
                : "In uso: <b>canzone originale, " + mmss(inf.song_len) + "</b>" +
                  (full ? ": il montaggio dura quanto lei." : fit ? "." : ": il montaggio si ferma sul «1» più vicino alla durata.");
@@ -3184,7 +3477,7 @@ function render() {
     $(id).disabled = !!ST.busy && c !== ST.busy;
     $(id).classList.toggle("working", ST.busy === c);
   }
-  if (!ST.busy) $("bAnalyze").disabled = !(v.length && ST.sel.song);
+  if (!ST.busy) $("bAnalyze").disabled = !(v.length && (tlm ? tl.track : ST.sel.song));
   if (!ST.busy) $("bAll").disabled = !inf.analyzed;
   renderPresets();
   syncControls();
@@ -3204,7 +3497,11 @@ for (const b of document.querySelectorAll(".looks button")) b.onclick = () => { 
 // Dentro PlutoniCut (la casa degli strumenti): niente intestazione propria, l'aspetto arriva dalla casa
 if (new URLSearchParams(location.search).has("embed")) document.documentElement.classList.add("embed");
 window.addEventListener("message", e => { if (e.data && e.data.look) setLook(e.data.look); });
-for (const k of ["reuse", "full", "fit", "pin"]) $(k).onclick = e => { e.preventDefault(); $(k).classList.toggle("on"); push(); if (ST) render(); };
+for (const k of ["reuse", "full", "fit", "pin"]) $(k).onclick = e => { e.preventDefault(); if ($(k).disabled) return; $(k).classList.toggle("on"); push(); if (ST) render(); };
+for (const b of $("src").children) b.onclick = () => {      // cambia da dove si prende la canzone
+  for (const x of $("src").children) x.classList.toggle("on", x === b);
+  push(); trackSig = ""; cmd("refresh");
+};
 $("dur").addEventListener("change", push);
 $("dur").addEventListener("input", () => { lastLocal = Date.now(); });
 $("tlname").addEventListener("change", push);
@@ -3229,8 +3526,9 @@ def setup():
         on_refresh()
     except Exception:
         pass
-    set_log("1) Seleziona nel Media Pool le clip video + la canzone   2) Imposta durata, ritmo, "
-            "formato e ordine   3) Analizza   4) Scegli il montaggio: aprilo nell'editor o Monta.")
+    set_log("1) Seleziona nel Media Pool le clip video + la canzone (o prendi la canzone dalla timeline "
+            "aperta, anche rimontata con l'AI Music Editor)   2) Imposta durata, ritmo, formato e ordine   "
+            "3) Analizza   4) Scegli il montaggio: aprilo nell'editor o Monta.")
 
 
 def main():
